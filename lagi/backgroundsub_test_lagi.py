@@ -1,5 +1,4 @@
 import os
-import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -77,79 +76,6 @@ class PatchDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, label
-
-def postprocess_mask(mask, kernel_size=5, min_area=30):
-    """
-    對模型輸出的二值 mask 做後處理。
-    mask: 0/255 的二值圖
-    """
-
-    # 確保是 uint8
-    mask = mask.astype(np.uint8)
-
-    # 建立形態學 kernel
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-
-    # 先做 close：補人物身上的小洞，讓主體更完整
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    # 再做 open：去除小雜訊
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    # 移除太小的連通區
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-
-    clean_mask = np.zeros_like(mask)
-
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        if area >= min_area:
-            clean_mask[labels == i] = 255
-
-    return clean_mask
-
-
-def draw_detection_boxes(image, mask, person_area_threshold=800, object_min_area=30):
-    """
-    根據前景 mask 畫出偵測框。
-    面積大的區域視為人物主體，小區域視為可能的移動物品。
-    image: 原始彩色圖 BGR
-    mask: 0/255 二值圖
-    """
-
-    result = image.copy()
-
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-
-    for i in range(1, num_labels):
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        if area >= person_area_threshold:
-            label_text = "person"
-            color = (0, 255, 0)
-        elif area >= object_min_area:
-            label_text = "object"
-            color = (0, 255, 255)
-        else:
-            continue
-
-        cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(
-            result,
-            f"{label_text}:{area}",
-            (x, max(y - 5, 15)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            1
-        )
-
-    return result
     
 def get_data_loader(data_dir, split_name, batch_size=32):
     transform = transforms.Compose([
