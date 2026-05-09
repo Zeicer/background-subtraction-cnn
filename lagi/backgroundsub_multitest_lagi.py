@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
 import numpy as np
-import matplotlib.pyplot as plt
 import time
 import glob
 import re
@@ -15,6 +14,8 @@ import re
 PATCH_SIZE = 27
 PADDING = 13
 IMAGE_SIZE = (320, 240)
+INFER_BATCH_SIZE = 4096
+SAVE_DEBUG_MASKS = False
 
 # 定義完整的 background subtraction 模型架構
 class BackgroundSubtractorCNN(nn.Module):
@@ -32,7 +33,7 @@ class BackgroundSubtractorCNN(nn.Module):
         )
         
         # 動態算 flatten size，避免手算錯
-        with torch.no_grad():
+        with torch.inference_mode():
             dummy = torch.zeros(1, 3, 27, 27)
             x = self.Conv(dummy)           # [1,16,3,3]
             flat = x.view(1, -1).size(1)   # 16*3*3=144
@@ -218,7 +219,13 @@ def draw_detection_boxes_dual_mask(
             y + h >= img_h - border_margin
         )
 
-        if touches_border:
+        # 人物允許從邊界進入，只排除很薄的邊界雜訊
+        is_thin_border_noise = (
+            touches_border and
+            (w <= 8 or h <= 8)
+        )
+
+        if is_thin_border_noise:
             continue
 
         aspect_ratio = h / max(w, 1)
@@ -254,7 +261,21 @@ def draw_detection_boxes_dual_mask(
             y + h >= img_h - border_margin
         )
 
-        if touches_border:
+        object_aspect_ratio = h / max(w, 1)
+
+        # 只在邊界附近時，才排除像人物碎片的物件
+        # 避免剛進畫面的人被誤判成 object
+        if touches_border and (h >= 50 or object_aspect_ratio >= 1.4):
+            continue
+
+        # object 不要完全禁止靠邊，否則靠近邊緣的遺留物會被排除
+        # 只排除很薄、很像邊界雜訊的區塊
+        is_thin_border_noise = (
+            touches_border and
+            (w <= 8 or h <= 8)
+        )
+
+        if is_thin_border_noise:
             continue
 
         object_box = (x, y, w, h)
@@ -300,7 +321,7 @@ def draw_detection_boxes_dual_mask(
             1
         )
 
-    return result
+    return result, person_boxes, object_boxes
 
 def merge_person_boxes(boxes, merge_distance=35):
     """
@@ -356,82 +377,14 @@ def merge_person_boxes(boxes, merge_distance=35):
 
     return merged
 
-
-def draw_detection_boxes(
-    image,
-    mask,
-    person_area_threshold,
-    object_min_area,
-    object_max_area,
-    border_margin
-):
-    """
-    不合併框版本：
-    目標是避免 object 被合併進 person。
-    面積大的連通區視為 person。
-    面積較小的連通區視為 object。
-    """
-
-    result = image.copy()
-    img_h, img_w = mask.shape[:2]
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-
-    for i in range(1, num_labels):
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        if area < object_min_area:
-            continue
-
-        touches_border = (
-            x <= border_margin or
-            y <= border_margin or
-            x + w >= img_w - border_margin or
-            y + h >= img_h - border_margin
-        )
-
-        if touches_border:
-            continue
-
-        # 大區域：人物
-        if area >= person_area_threshold:
-            label_text = "person"
-            color = (0, 255, 0)
-
-        # 小區域：物品
-        elif object_min_area <= area <= object_max_area:
-            label_text = "object"
-            color = (0, 255, 255)
-
-        else:
-            continue
-
-        cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(
-            result,
-            f"{label_text}:{area}",
-            (x, max(y - 5, 15)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            1
-        )
-
-    return result
-
-def create_constant_image(size=(320, 240), value=128):
+def create_constant_image(size=IMAGE_SIZE, value=128):
     # size 是 (width, height)，要轉成 (height, width) 給 numpy
     w, h = size
     img_array = np.full((h, w), value, dtype=np.uint8)
     return Image.fromarray(img_array)
 
-def make_rgb_patches_from_rgb(bg_img, in_img, patch_size=PATCH_SIZE, padding=PADDING):
+def make_rgb_patches_from_rgb(bg_img, in_img, patch_size=PATCH_SIZE, padding=PADDING, size=IMAGE_SIZE):
     """先疊成 RGB，再轉灰階+padding+切 patch，回傳 [N,3,patch,patch]"""
-    size = (320, 240)
 
     # print("before resize:", bg_img.size, in_img.size)  # Debug 用
     # 統一 resize
@@ -461,10 +414,9 @@ def make_rgb_patches_from_rgb(bg_img, in_img, patch_size=PATCH_SIZE, padding=PAD
     patches = patches.permute(1, 2, 0, 3, 4).reshape(-1, 3, patch_size, patch_size)
     return patches, Hp, Wp
 
-def infer_frame(model, bg_path, input_path, device, patch_size=PATCH_SIZE, padding=PADDING, size=IMAGE_SIZE):
+def infer_frame(model, bg_img, input_path, device, patch_size=PATCH_SIZE, padding=PADDING, size=IMAGE_SIZE):
 
     try:
-        bg_img = Image.open(bg_path)
         in_img = Image.open(input_path)
     except FileNotFoundError as e:
         print("讀取圖片失敗：", e)
@@ -474,15 +426,16 @@ def infer_frame(model, bg_path, input_path, device, patch_size=PATCH_SIZE, paddi
         bg_img,
         in_img,
         patch_size=patch_size,
-        padding=padding
+        padding=padding,
+        size=size
     )
 
     model.eval()
     preds = []
 
-    with torch.no_grad():
-        for i in range(0, patches.size(0), 512):
-            batch = patches[i:i+512].to(device)
+    with torch.inference_mode():
+        for i in range(0, patches.size(0), INFER_BATCH_SIZE):
+            batch = patches[i:i+INFER_BATCH_SIZE].to(device)
             logits = model(batch)
             pred = torch.argmax(logits, dim=1)
             preds.append(pred.cpu().numpy())
@@ -501,6 +454,7 @@ def main():
 
     input_dir = r"C:\zeicer\dataset\lagi\input"
     bg_path = r"C:\zeicer\dataset\lagi\background.jpg"
+    bg_img = Image.open(bg_path)
     ckpt_dir = r"C:\zeicer\batch_pth"
 
     output_root = r"C:\zeicer\dataset\lagi\maskpicture"
@@ -516,7 +470,7 @@ def main():
     os.makedirs(box_dir, exist_ok=True)
 
     image_paths = sorted(glob.glob(os.path.join(input_dir, "*.jpg")))
-    # image_paths = image_paths[140:170]
+    image_paths = image_paths[100:]
 
     if len(image_paths) == 0:
         print("找不到任何輸入圖片：", input_dir)
@@ -551,6 +505,11 @@ def main():
     success_count = 0
     model_total_time = 0.0
 
+    last_object_boxes = []
+    object_missing_count = 0
+    max_object_missing_frames = 10   # 物品消失後最多保留幾幀
+    max_object_alive_frames = 50     # 物品最多顯示幾幀
+
     for idx, input_path in enumerate(image_paths):
         filename = os.path.splitext(os.path.basename(input_path))[0]
 
@@ -561,7 +520,7 @@ def main():
             torch.cuda.synchronize()
         model_start = time.perf_counter()
 
-        mask_img = infer_frame(model, bg_path, input_path, device)
+        mask_img = infer_frame(model, bg_img, input_path, device)
 
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -577,8 +536,6 @@ def main():
         person_mask_path = os.path.join(person_dir, f"{filename}_person_mask.png")
         box_path = os.path.join(box_dir, f"{filename}_detection_box.png")
 
-        mask_img.save(raw_mask_path)
-
         raw_mask = np.array(mask_img).astype(np.uint8)
 
         if raw_mask.max() == 1:
@@ -589,20 +546,16 @@ def main():
             raw_mask,
             kernel_size=3,
             min_area=20,
-            border_ignore=20
+            border_ignore=10
         )
-
-        cv2.imwrite(object_mask_path, object_mask)
 
         # ========== 3. person mask：加強處理，讓人物比較完整 ==========
         person_mask = postprocess_mask_for_person(
             raw_mask,
             kernel_size=7,
             min_area=100,
-            border_ignore=20
+            border_ignore=5
         )
-
-        cv2.imwrite(person_mask_path, person_mask)
 
         # ========== 4. detection box ==========
         original_image = cv2.imread(input_path)
@@ -611,19 +564,51 @@ def main():
             print("原圖讀取失敗，無法輸出 detection box：", input_path)
             continue
 
-        original_image = cv2.resize(original_image, (320, 240))
+        original_image = cv2.resize(original_image, IMAGE_SIZE)
 
-        box_image = draw_detection_boxes_dual_mask(
+        box_image, person_boxes, object_boxes  = draw_detection_boxes_dual_mask(
             original_image,
             person_mask,
             object_mask,
             person_area_threshold=700,
-            object_min_area=15,
-            object_max_area=450,
+            object_min_area=50,
+            object_max_area=800,
             border_margin=15,
             person_min_height=80,
             person_min_aspect_ratio=1.4
         )
+
+        if SAVE_DEBUG_MASKS:
+            mask_img.save(raw_mask_path)
+            cv2.imwrite(object_mask_path, object_mask)
+            cv2.imwrite(person_mask_path, person_mask)
+
+        # ========== 5. object 記憶機制 ==========
+        if len(object_boxes) > 0:
+            # 這一幀有偵測到 object，更新記憶
+            last_object_boxes = object_boxes
+            object_missing_count = 0
+        else:
+            # 這一幀沒偵測到 object
+            object_missing_count += 1
+
+            # 如果還在允許範圍內，就沿用上一幀 object
+            if object_missing_count <= max_object_missing_frames:
+                for x, y, w, h, area in last_object_boxes:
+                    color = (0, 165, 255)  # 橘色，代表 tracked object
+                    cv2.rectangle(box_image, (x, y), (x + w, y + h), color, 2)
+                    cv2.putText(
+                        box_image,
+                        f"tracked_object:{area}",
+                        (x, max(y - 5, 15)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        color,
+                        1
+                    )
+            else:
+                # 消失太久，清除記憶
+                last_object_boxes = []
 
         cv2.imwrite(box_path, box_image)
 
