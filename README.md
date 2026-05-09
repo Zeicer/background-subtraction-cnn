@@ -40,7 +40,7 @@ dataset/
 │
 └─ baseline/
    ├─ input/
-   ├─ background/
+   ├─ background.jpg
    ├─ groundtruth/
    └─ patches/
 ```
