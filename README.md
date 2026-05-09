@@ -6,7 +6,7 @@
 This folder shows the expected dataset layout.
 
 ## Structure
-
+'''
 dataset/
 ├─ Rain/
 │  ├─ input/
@@ -43,7 +43,7 @@ dataset/
    ├─ background/
    ├─ groundtruth/
    └─ patches/
-
+'''
 ## Notes
 
 patch的命名規則是"照片張數_第幾份patch.npy"
