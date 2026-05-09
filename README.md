@@ -18,10 +18,15 @@ dataset/
 │  │  ├─ Rain_v2_0250.bmp
 │  │  ├─ Rain_v2_0251.bmp
 │  │  └─ ...
-│  └─ patches/
-│     ├─ 000001_000.npy
-│     ├─ 000002_001.npy
-│     └─ ...
+│  └─ Rain_patch/
+│     ├─ train/
+│     │  ├─ 000000_000.npy
+│     │  ├─ 000000_001.npy
+│     │  └─ ...
+│     └─ valid/
+│        ├─ 000001_000.npy
+│        ├─ 000001_001.npy
+│        └─ ...
 │
 ├─ lagi/
 │  ├─ input/
@@ -33,10 +38,15 @@ dataset/
 │  │  ├─ frame_000000_aligned_mask.png
 │  │  ├─ frame_000001_aligned_mask.png
 │  │  └─ ...
-│  └─ patches/
-│     ├─ 000000_000.npy
-│     ├─ 000000_001.npy
-│     └─ ...
+│  └─ lagi_patch/
+│     ├─ train/
+│     │  ├─ 000000_000.npy
+│     │  ├─ 000000_001.npy
+│     │  └─ ...
+│     └─ valid/
+│        ├─ 000001_000.npy
+│        ├─ 000001_001.npy
+│        └─ ...
 │
 └─ baseline/
    ├─ input/
