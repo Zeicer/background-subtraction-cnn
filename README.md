@@ -46,6 +46,6 @@ dataset/
 ```
 ## Notes
 
-patch的命名規則是"照片張數_第幾份patch.npy"
-lagi的groundtruth為從zecplusgg_re_code.py中的pseudo_masks獲取
-Large image files, `.npy`, `.pt`, and model weights are not uploaded to GitHub.
+   patch的命名規則是"照片張數_第幾份patch.npy"
+   lagi的groundtruth為從zecplusgg_re_code.py中的pseudo_masks獲取
+   Large image files, `.npy`, `.pt`, and model weights are not uploaded to GitHub.
