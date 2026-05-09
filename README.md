@@ -3,7 +3,7 @@
 
 # Dataset Folder Structure
 
-This folder shows the expected dataset layout.
+以下展示了資料集的格式
 
 ## Structure
 ```text
