@@ -153,7 +153,7 @@ class HybridBGSSystem:
         self.fgbg = cv2.createBackgroundSubtractorMOG2(
             history=300,
             varThreshold=varThreshold,
-            detectShadows=True
+            detectShadows=False
         )
 
         self.best_channels = None
