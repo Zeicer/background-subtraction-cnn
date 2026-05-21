@@ -347,7 +347,7 @@ class HybridBGSSystem:
             0
         )
 
-        raw_mask = self.fgbg.apply(enhanced_frame)
+        raw_mask = self.fgbg.apply(enhanced_frame,learningRate=0.001)
 
         return raw_mask
 
