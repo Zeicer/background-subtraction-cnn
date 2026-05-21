@@ -695,7 +695,7 @@ def main():
 
     print("使用裝置:", device)
 
-    update_interval = 2
+    update_interval = 1
     varThreshold = 16
     num_classes = 2
     active_ratio_threshold = 0.35
