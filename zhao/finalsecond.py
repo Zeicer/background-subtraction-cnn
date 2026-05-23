@@ -875,6 +875,478 @@ def main(
 
     print("✨ 三視窗行為分析與事件影片分類輸出完成！")
 
+# =========================================================
+# Realtime API
+# =========================================================
+def init_behavior_system():
+    pose_model = YOLO("yolo11n-pose.pt")
+
+    person_tracker = SimpleGeometryTracker(
+        max_lost=25
+    )
+
+    object_tracker = SimpleGeometryTracker(
+        max_lost=15
+    )
+
+    analyzer = BehaviorAnalyzer()
+
+    state = {
+        "BASE_COMPENSATION": 10,
+        "MAX_COMPENSATION": 150,
+        "TRUST_ACCUMULATION_RATE": 0.5,
+        "last_object_boxes": [],
+        "object_missing_count": 0,
+        "object_alive_frames": 0,
+        "current_allowed_compensation": 10,
+        "object_alive_frames_dict": {}
+    }
+
+    return {
+        "pose_model": pose_model,
+        "person_tracker": person_tracker,
+        "object_tracker": object_tracker,
+        "analyzer": analyzer,
+        "state": state
+    }
+
+
+def analyze_one_frame(
+    frame,
+    mask,
+    behavior_pack
+):
+    pose_model = behavior_pack["pose_model"]
+    person_tracker = behavior_pack["person_tracker"]
+    object_tracker = behavior_pack["object_tracker"]
+    analyzer = behavior_pack["analyzer"]
+    state = behavior_pack["state"]
+
+    if frame is None or mask is None:
+        raise ValueError("frame 或 mask 是 None")
+
+    ori_img = cv2.resize(
+        frame,
+        (320, 240)
+    )
+
+    if len(mask.shape) == 3:
+        raw_mask = cv2.cvtColor(
+            mask,
+            cv2.COLOR_BGR2GRAY
+        )
+    else:
+        raw_mask = mask.copy()
+
+    raw_mask = cv2.resize(
+        raw_mask,
+        (320, 240),
+        interpolation=cv2.INTER_NEAREST
+    )
+
+    obj_mask = postprocess_mask_for_object(
+        raw_mask,
+        kernel_size=3,
+        min_area=20,
+        border_ignore=10
+    )
+
+    kernel = np.ones((3, 3), np.uint8)
+
+    person_bgs_mask = cv2.morphologyEx(
+        raw_mask,
+        cv2.MORPH_OPEN,
+        kernel,
+        iterations=1
+    )
+
+    person_bgs_mask = cv2.morphologyEx(
+        person_bgs_mask,
+        cv2.MORPH_CLOSE,
+        kernel,
+        iterations=2
+    )
+
+    foreground_only = cv2.bitwise_and(
+        ori_img,
+        ori_img,
+        mask=person_bgs_mask
+    )
+
+    annotated_frame = ori_img.copy()
+    bg_remove_render = foreground_only.copy()
+
+    pose_results = pose_model(
+        ori_img,
+        verbose=False,
+        conf=0.3
+    )
+
+    if len(pose_results[0].boxes) > 0:
+        pose_results[0].orig_img = annotated_frame
+        annotated_frame = pose_results[0].plot(
+            boxes=False
+        )
+
+        pose_results[0].orig_img = bg_remove_render
+        bg_remove_render = pose_results[0].plot(
+            boxes=False
+        )
+
+    detected_people_boxes = []
+    detected_keypoints_list = []
+
+    if len(pose_results[0].boxes) > 0:
+        all_boxes = pose_results[0].boxes
+
+        if pose_results[0].keypoints is not None:
+            all_kpts_data = (
+                pose_results[0]
+                .keypoints
+                .xy
+                .cpu()
+                .numpy()
+            )
+        else:
+            all_kpts_data = None
+
+        for idx, box in enumerate(all_boxes):
+            if int(box.cls[0]) == 0:
+                px1, py1, px2, py2 = map(
+                    int,
+                    box.xyxy[0]
+                )
+
+                detected_people_boxes.append(
+                    (
+                        px1,
+                        py1,
+                        px2 - px1,
+                        py2 - py1
+                    )
+                )
+
+                if (
+                    all_kpts_data is not None
+                    and idx < len(all_kpts_data)
+                ):
+                    detected_keypoints_list.append(
+                        all_kpts_data[idx]
+                    )
+                else:
+                    detected_keypoints_list.append(None)
+
+    active_people = person_tracker.update(
+        detected_people_boxes
+    )
+
+    for pid, bbox in active_people.items():
+        px, py, pw, ph = bbox
+
+        matched_kpts = None
+        best_iou = 0.5
+
+        for idx, d_box in enumerate(detected_people_boxes):
+            iou = calculate_iou(
+                bbox,
+                d_box
+            )
+
+            if iou > best_iou:
+                best_iou = iou
+                matched_kpts = detected_keypoints_list[idx]
+
+        analyzer.update_person(
+            pid,
+            bbox,
+            keypoints=matched_kpts
+        )
+
+        is_run, speed = analyzer.check_running(pid)
+        is_loiter = analyzer.check_loitering(pid)
+        is_fall = analyzer.check_fall(pid)
+
+        for view in [annotated_frame, bg_remove_render]:
+            cv2.rectangle(
+                view,
+                (px, py),
+                (px + pw, py + ph),
+                (255, 255, 255),
+                2
+            )
+
+            cv2.putText(
+                view,
+                f"ID:{pid}",
+                (px, max(py - 8, 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 255, 255),
+                1
+            )
+
+            if is_fall:
+                cv2.putText(
+                    view,
+                    " ALERT: FAINT!",
+                    (px - 10, py + ph + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 0, 255),
+                    2
+                )
+
+            elif is_run:
+                cv2.putText(
+                    view,
+                    f"RUNNING ({int(speed)}%)",
+                    (px, py - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (0, 255, 255),
+                    1
+                )
+
+            if is_loiter:
+                cv2.putText(
+                    view,
+                    "LOITERING",
+                    (px + pw - 65, py - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (255, 0, 255),
+                    1
+                )
+
+    pids = list(active_people.keys())
+
+    for i in range(len(pids)):
+        for j in range(i + 1, len(pids)):
+            if analyzer.check_collision(
+                pids[i],
+                pids[j]
+            ):
+                bx1, by1, _, _ = active_people[pids[i]]
+                bx2, by2, _, _ = active_people[pids[j]]
+
+                for view in [annotated_frame, bg_remove_render]:
+                    cv2.putText(
+                        view,
+                        " COLLISION!",
+                        (
+                            (bx1 + bx2) // 2,
+                            (by1 + by2) // 2
+                        ),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 75, 255),
+                        2
+                    )
+
+    num_o, labels_o, stats_o, _ = cv2.connectedComponentsWithStats(
+        obj_mask,
+        connectivity=8
+    )
+
+    current_frame_object_boxes = []
+
+    for i in range(1, num_o):
+        x = stats_o[i, 0]
+        y = stats_o[i, 1]
+        w = stats_o[i, 2]
+        h = stats_o[i, 3]
+        area = stats_o[i, 4]
+
+        if area < 15 or area > 450:
+            continue
+
+        if w < 3 or h < 3:
+            continue
+
+        if (
+            x <= 15
+            or y <= 15
+            or x + w >= 305
+            or y + h >= 225
+        ) and (
+            h >= 50
+            or (h / max(w, 1)) >= 1.4
+            or w <= 8
+            or h <= 8
+        ):
+            continue
+
+        if not any(
+            box_inside_or_overlap(
+                (x, y, w, h),
+                b,
+                0.8
+            )
+            for b in detected_people_boxes
+        ):
+            current_frame_object_boxes.append(
+                (x, y, w, h)
+            )
+
+    if len(current_frame_object_boxes) > 0:
+        state["last_object_boxes"] = current_frame_object_boxes
+        state["object_missing_count"] = 0
+        state["object_alive_frames"] += 1
+
+        state["current_allowed_compensation"] = min(
+            int(
+                state["BASE_COMPENSATION"]
+                + (
+                    state["object_alive_frames"]
+                    * state["TRUST_ACCUMULATION_RATE"]
+                )
+            ),
+            state["MAX_COMPENSATION"]
+        )
+
+        active_objects = object_tracker.update(
+            current_frame_object_boxes
+        )
+
+        for oid in active_objects.keys():
+            state["object_alive_frames_dict"][oid] = (
+                state["object_alive_frames_dict"].get(oid, 0)
+                + 1
+            )
+
+        for oid, obbox in active_objects.items():
+            analyzer.update_object(
+                oid,
+                obbox
+            )
+
+            is_litter = analyzer.check_littering(oid)
+
+            ox, oy, ow, oh = obbox
+
+            if is_litter:
+                assigned_pid = getattr(
+                    analyzer,
+                    "object_owner_memory",
+                    {}
+                ).get(oid)
+
+                if (
+                    assigned_pid is not None
+                    and assigned_pid in active_people
+                ):
+                    px, py, pw, ph = active_people[assigned_pid]
+
+                    for view in [annotated_frame, bg_remove_render]:
+                        cv2.rectangle(
+                            view,
+                            (px, py),
+                            (px + pw, py + ph),
+                            (0, 0, 255),
+                            3
+                        )
+
+                        cv2.putText(
+                            view,
+                            f"LITTERER CAUGHT! (ID:{assigned_pid})",
+                            (px, max(py - 22, 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45,
+                            (0, 0, 255),
+                            2
+                        )
+
+                cv2.rectangle(
+                    bg_remove_render,
+                    (ox, oy),
+                    (ox + ow, oy + oh),
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.putText(
+                    bg_remove_render,
+                    f"LITTER OBJ:{oid}",
+                    (ox, max(oy - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 0, 255),
+                    1
+                )
+
+            else:
+                cv2.rectangle(
+                    bg_remove_render,
+                    (ox, oy),
+                    (ox + ow, oy + oh),
+                    (0, 255, 255),
+                    1
+                )
+
+                cv2.putText(
+                    bg_remove_render,
+                    f"obj:{oid}",
+                    (ox, max(oy - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (0, 255, 255),
+                    1
+                )
+
+    else:
+        state["object_missing_count"] += 1
+
+        enough_history = max(
+            state["object_alive_frames_dict"].values()
+            if state["object_alive_frames_dict"]
+            else [0]
+        ) >= 3
+
+        if (
+            state["object_missing_count"]
+            <= state["current_allowed_compensation"]
+            and enough_history
+        ):
+            for last_box in state["last_object_boxes"]:
+                lox, loy, low, loh = last_box
+
+                cv2.rectangle(
+                    bg_remove_render,
+                    (lox, loy),
+                    (lox + low, loy + loh),
+                    (0, 165, 255),
+                    1,
+                    cv2.LINE_AA
+                )
+
+                cv2.putText(
+                    bg_remove_render,
+                    f"Tracking Lost ({state['object_missing_count']}/{state['current_allowed_compensation']})",
+                    (lox, max(loy - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.3,
+                    (0, 165, 255),
+                    1
+                )
+        else:
+            state["last_object_boxes"] = []
+            state["object_alive_frames"] = 0
+            state["current_allowed_compensation"] = state["BASE_COMPENSATION"]
+            state["object_alive_frames_dict"].clear()
+
+    analyzer.clear_dead_tracks(
+        list(active_people.keys()),
+        list(object_tracker.tracked_objects.keys())
+    )
+
+    display_mask = (
+        obj_mask
+        if obj_mask.max() == 255
+        else obj_mask * 255
+    )
+
+    return annotated_frame, display_mask, bg_remove_render
+
 
 if __name__ == "__main__":
 

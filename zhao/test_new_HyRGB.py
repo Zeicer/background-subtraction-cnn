@@ -972,6 +972,139 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
     else:
         print("⚠️ 沒有找到 mask 圖片")
 
+# =========================================================
+# Realtime API
+# =========================================================
+
+def init_hyrgb_system(
+        base_dir,
+        roi_model_dir,
+        background_path=None,
+        calibration_frames = None,
+        scene_id = "realtime",
+        update_interval = 1,
+        varThreshold = 16,
+        active_ratio_threshold=0.35
+):
+    device = torch.device("cuda"if torch.cuda.is_available() else "cpu")
+    print("使用裝置:", device)
+    num_classes = 2
+    full_lenet_model_dir = roi_model_dir
+
+    if background_path is None:
+        background_path = os.path.join(
+            base_dir,
+            "background.jpg"
+        )
+
+    bg_img = Image.open(background_path).convert("RGB")
+
+    cnn_model = BackgroundSubtractorCNN(num_classes)
+
+    ckpt_list = glob.glob(
+        os.path.join(
+            roi_model_dir,
+            "best_model_step*.pth"
+        )
+    )
+
+    if ckpt_list:
+        roi_model_path = sorted(ckpt_list)[-1]
+        print("載入 ROI CNN 權重:", roi_model_path)
+
+        cnn_model.load_state_dict(
+            torch.load(
+                roi_model_path,
+                map_location=device
+            )
+        )
+    else:
+        print("⚠️ 找不到 ROI CNN 權重，會使用未訓練模型")
+
+    full_lenet_model = BackgroundSubtractorCNN(num_classes)
+
+    full_ckpt_list = glob.glob(
+        os.path.join(
+            full_lenet_model_dir,
+            "best_model_step*.pth"
+        )
+    )
+
+    if full_ckpt_list:
+        full_lenet_model_path = sorted(full_ckpt_list)[-1]
+        print("載入 LeNet 全圖權重:", full_lenet_model_path)
+
+        full_lenet_model.load_state_dict(
+            torch.load(
+                full_lenet_model_path,
+                map_location=device
+            )
+        )
+    else:
+        print("⚠️ 找不到 LeNet 權重檔，會使用未訓練模型")
+
+    vgg16_full = vgg16(
+        weights=VGG16_Weights.IMAGENET1K_V1
+    ).features.to(device)
+
+    vgg_extractor = nn.Sequential(
+        vgg16_full[0]
+    ).to(device).eval()
+
+    system = HybridBGSSystem(
+        cnn_model=cnn_model,
+        full_lenet_model=full_lenet_model,
+        vgg_extractor=vgg_extractor,
+        device=device,
+        update_interval=update_interval,
+        varThreshold=varThreshold,
+        scene_cache=global_scene_cache,
+        active_ratio_threshold=active_ratio_threshold
+    )
+
+    if calibration_frames is not None and len(calibration_frames) > 0:
+        system.calibrate_vgg_channels(
+            scene_id,
+            calibration_frames
+        )
+    else:
+        print("⚠️ 即時模式沒有校準影格，使用預設通道 [0, 1]")
+        system.best_channels = [0, 1]
+        system.is_calibrated = True
+
+    return system, bg_img
+
+
+def infer_one_frame(
+    system,
+    bg_img,
+    frame
+):
+    if isinstance(frame, np.ndarray):
+        frame_rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        curr_img = Image.fromarray(
+            frame_rgb
+        ).convert("RGB")
+
+    elif isinstance(frame, Image.Image):
+        curr_img = frame.convert("RGB")
+
+    else:
+        raise TypeError(
+            "frame 必須是 OpenCV numpy.ndarray 或 PIL.Image"
+        )
+
+    mask_img, active_count = system.infer(
+        bg_img,
+        curr_img
+    )
+
+    return mask_img, active_count
+
 
 # =========================================================
 # Run
