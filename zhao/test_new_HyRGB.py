@@ -685,7 +685,7 @@ global_scene_cache = SceneCache(max_size=10)
 # Main
 # =========================================================
 
-def main():
+def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = "ghz_mask1/mask"):
 
     device = torch.device(
         "cuda"
@@ -700,16 +700,18 @@ def main():
     num_classes = 2
     active_ratio_threshold = 0.35
 
-    base_dir = "./dataset/room"
-    data_dir = "pic_obalanuwalk"
+    # base_dir = "./dataset/room"
+    # data_dir = "pic_obalanuwalk"
 
-    roi_model_dir = r"C:\zeicer\room\batch_pth"
+    # roi_model_dir = r"C:\zeicer\room\batch_pth"
 
     # 這裡改成你的純 LeNet 權重
     # full_lenet_model_path = "./batch_pth/best_model_step130000_lagi_lagi_patch.pth"
     full_lenet_model_dir = roi_model_dir
-    ghz_mask_dir = "ghz_mask1/mask"
-    input_picture = range(0, 915)
+    # ghz_mask_dir = "ghz_mask1/mask"
+    # input_picture = range(0, 915)
+    if input_picture is None:
+        raise ValueError("input_picture 不能是 None，請從 run.py 傳入圖片路徑清單")
 
     mask_save_dir = os.path.join(
         base_dir,
@@ -820,13 +822,9 @@ def main():
 
     cal_indices = list(input_picture)[:100]
 
-    for i in cal_indices:
+    for img_path in cal_indices:
 
-        path = os.path.join(
-            base_dir,
-            data_dir,
-            f"frame_{i:06d}.jpg"
-        )
+        path = img_path
 
         if os.path.exists(path):
             calibration_frames.append(
@@ -853,17 +851,9 @@ def main():
     model_total_time = 0.0
     processed_frames = 0
 
-    for i in input_picture:
-
-        img_path = os.path.join(
-            base_dir,
-            data_dir,
-            f"frame_{i:06d}.jpg"
-        )
-
+    for frame_idx,img_path in enumerate(input_picture):
         if not os.path.exists(img_path):
             continue
-
         curr_img = Image.open(img_path)
 
         frame_start = time.perf_counter()
@@ -879,9 +869,12 @@ def main():
 
         processed_frames += 1
 
+        filename = os.path.basename(img_path)
+        name = os.path.splitext(filename)[0]
+
         save_path = os.path.join(
             mask_save_dir,
-            f"pred_mask_{i:06d}.png"
+            f"{name}_mask.png"
         )
 
         mask_img.save(save_path)
@@ -891,13 +884,13 @@ def main():
         ) * 100
 
         print(
-            f"Frame {i} | "
+            f"Frame {frame_idx} | "
             f"Active: {active_count} "
             f"({percentage:.2f}%) | "
             f"Saved: {save_path}"
         )
 
-        if i % 50 == 0:
+        if frame_idx % 50 == 0:
             system.print_profile()
 
     # =====================================================
@@ -935,7 +928,7 @@ def main():
     video_path = os.path.join(
         base_dir,
         "maskpicture",
-        "ghz_mask1",
+        "mask_video",
         "mask_video.mp4"
     )
 
@@ -985,4 +978,7 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
-    main()
+    run_hyrgb(base_dir="./dataset/room",
+        data_dir="pic_obalanuwalk",
+        roi_model_dir=r"C:\zeicer\room\batch_pth"
+        )
