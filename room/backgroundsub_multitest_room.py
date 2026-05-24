@@ -456,7 +456,7 @@ def main():
 
     # input_dir = rf"C:\zeicer\dataset\{environment}\input"
     # input_dir = rf"C:\Users\lab1\Desktop\video\pic_lagi2"
-    input_dir = rf"C:\Users\lab1\Desktop\video\pic_obalanuwalk"
+    input_dir = rf"C:\zeicer\room\dataset\room\pic_obalanuwalk"
     bg_path = rf"C:\zeicer\dataset\{environment}\background.jpg"
     bg_img = Image.open(bg_path)
     ckpt_dir = r"C:\zeicer\batch_pth"
