@@ -132,6 +132,9 @@ class RunApp(tk.Tk):
         self.event_button_alerts = {}
         self.event_items = {event: [] for event in EVENT_LABELS}
         self.event_seen = set()
+        self.event_last_accept_time = {}
+        self.event_pages = {event: 0 for event in EVENT_LABELS}
+        self.event_frame_buffer = deque(maxlen=300)
         self.event_cover_refs = []
         self.selected_event = None
         self.event_cover_frame = None
@@ -674,8 +677,22 @@ class RunApp(tk.Tk):
 
         return max(videos, key=os.path.getmtime)
 
+    def _remember_event_frame(self, result):
+        frame = result.get("view1_box_only")
+
+        if frame is None:
+            return
+
+        self.event_frame_buffer.append(
+            (
+                time.time(),
+                result.get("frame_idx"),
+                frame.copy()
+            )
+        )
+
     def _create_event_video(self, event_key, result):
-        image = result.get("view2_skeleton")
+        image = result.get("view1_box_only")
 
         if image is None:
             return None
@@ -687,16 +704,29 @@ class RunApp(tk.Tk):
         filename = f"gui_event_{frame_idx}_{int(time.time() * 1000)}.mp4"
         video_path = os.path.join(folder, filename)
 
-        if len(image.shape) == 2:
-            frame = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            frame = image.copy()
-
-        frame = cv2.resize(frame, (320, 240))
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(video_path, fourcc, 10.0, (320, 240))
+        fps = 10.0
+        writer = cv2.VideoWriter(video_path, fourcc, fps, (320, 240))
+        cutoff = time.time() - 10
+        frames = [
+            frame
+            for ts, _, frame in self.event_frame_buffer
+            if ts >= cutoff
+        ]
 
-        for _ in range(20):
+        if not frames:
+            frames = [image]
+
+        while len(frames) < int(fps * 10):
+            frames.append(frames[-1])
+
+        for frame in frames[-int(fps * 10):]:
+            if len(frame.shape) == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            else:
+                frame = frame.copy()
+
+            frame = cv2.resize(frame, (320, 240))
             writer.write(frame)
 
         writer.release()
@@ -710,6 +740,12 @@ class RunApp(tk.Tk):
             if not triggered or event_key not in EVENT_LABELS:
                 continue
 
+            now = time.time()
+            last_accept = self.event_last_accept_time.get(event_key)
+
+            if last_accept is not None and now - last_accept < 30:
+                continue
+
             event_id = (
                 event_key,
                 result.get("frame_idx"),
@@ -720,6 +756,7 @@ class RunApp(tk.Tk):
                 continue
 
             self.event_seen.add(event_id)
+            self.event_last_accept_time[event_key] = now
 
             self._set_event_alert()
             self.event_button_alerts[event_key].configure(text="●")
@@ -727,7 +764,7 @@ class RunApp(tk.Tk):
             item = {
                 "event_key": event_key,
                 "frame_idx": result.get("frame_idx", len(self.event_items[event_key])),
-                "image": result.get("view2_skeleton"),
+                "image": result.get("view1_box_only"),
                 "is_new": True,
                 "video_path": self._create_event_video(event_key, result),
                 "folder_path": self._event_folder_for(event_key)
@@ -747,13 +784,36 @@ class RunApp(tk.Tk):
 
         self.event_cover_refs.clear()
 
-        title = ttk.Label(
-            self.event_cover_frame,
-            text=f"{EVENT_LABELS[event_key]}事件封面"
-        )
-        title.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-
         items = self.event_items.get(event_key, [])
+        per_page = 4
+        total_pages = max(1, (len(items) + per_page - 1) // per_page)
+        page = min(self.event_pages.get(event_key, 0), total_pages - 1)
+        self.event_pages[event_key] = page
+
+        header = ttk.Frame(self.event_cover_frame)
+        header.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+
+        ttk.Label(
+            header,
+            text=f"{EVENT_LABELS[event_key]}事件封面"
+        ).pack(side="left")
+
+        ttk.Button(
+            header,
+            text="上一頁",
+            command=lambda key=event_key: self.change_event_page(key, -1)
+        ).pack(side="left", padx=(16, 4))
+
+        ttk.Label(
+            header,
+            text=f"第 {page + 1}/{total_pages} 頁"
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            header,
+            text="下一頁",
+            command=lambda key=event_key: self.change_event_page(key, 1)
+        ).pack(side="left", padx=4)
 
         if not items:
             ttk.Label(self.event_cover_frame, text="目前沒有事件封面。").grid(
@@ -763,9 +823,11 @@ class RunApp(tk.Tk):
             )
             return
 
-        for idx, item in enumerate(items):
-            row = 1 + idx // 4
-            col = idx % 4
+        page_items = items[page * per_page:(page + 1) * per_page]
+
+        for idx, item in enumerate(page_items):
+            row = 1
+            col = idx
 
             card = ttk.Frame(self.event_cover_frame, padding=6)
             card.grid(row=row, column=col, padx=6, pady=6, sticky="n")
@@ -802,6 +864,14 @@ class RunApp(tk.Tk):
                 text="開啟影片",
                 command=lambda data=item: self.open_event_item(data)
             ).pack(fill="x", pady=(4, 0))
+
+    def change_event_page(self, event_key, delta):
+        items = self.event_items.get(event_key, [])
+        per_page = 4
+        total_pages = max(1, (len(items) + per_page - 1) // per_page)
+        next_page = self.event_pages.get(event_key, 0) + delta
+        self.event_pages[event_key] = max(0, min(total_pages - 1, next_page))
+        self.show_event_covers(event_key)
 
     def open_event_item(self, item):
         item["is_new"] = False
@@ -946,7 +1016,8 @@ class RunApp(tk.Tk):
         self.output_buffer.clear()
         self.playback_results = []
         self.playback_index = 0
-        self.offline_processing = True
+        self.event_frame_buffer.clear()
+        self.offline_processing = False
         self.offline_progress.set(0)
         self.offline_progress_text.set("0%")
         self.last_result = None
@@ -1062,6 +1133,7 @@ class RunApp(tk.Tk):
                 while True:
                     result = self.result_queue.get_nowait()
                     self.output_buffer.append(result)
+                    self._remember_event_frame(result)
 
                     if any(result.get("frame_triggers", {}).values()):
                         self._handle_result_events(result)
@@ -1092,9 +1164,6 @@ class RunApp(tk.Tk):
                         self.last_result = self.output_buffer.popleft()
 
             if self.last_result is not None:
-                if any(self.last_result.get("frame_triggers", {}).values()):
-                    self._handle_result_events(self.last_result)
-
                 for key, panel in self.panels.items():
                     panel.set_image(self.last_result.get(key))
 
@@ -1168,7 +1237,9 @@ class RunApp(tk.Tk):
         self.output_buffer.clear()
         self.playback_results = []
         self.playback_index = 0
+        self.event_frame_buffer.clear()
         self.last_result = None
+        self.offline_processing = True
         self.playback_paused.set(False)
         self.offline_thread = threading.Thread(
             target=self._offline_worker,
@@ -1197,6 +1268,7 @@ class RunApp(tk.Tk):
 
             def collect_result(result):
                 collected_results.append(result)
+                self.after(0, self._remember_event_frame, result)
 
                 if any(result.get("frame_triggers", {}).values()):
                     self.after(0, self._handle_result_events, result)
