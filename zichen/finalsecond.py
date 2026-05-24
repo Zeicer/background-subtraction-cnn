@@ -245,6 +245,12 @@ def main(
         for k in behavior_dirs.keys()
     }
 
+    # COCO 格式的官方骨架連線索引對應定義
+    skeleton_connections = [
+        (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13), 
+        (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 0), (0, 2), (0, 1)
+    ]
+
     global_frame_idx = 0
 
     for path in image_paths:
@@ -311,19 +317,46 @@ def main(
         bg_remove_render = foreground_only.copy()
         clean_frame = ori_img.copy()
 
-        # 🔄【改回最穩定的寫法】將模型輸入改回原始有背景的「ori_img」，確保 AI 特徵不丟失
+        # ✨【核心修改點一：主程式自適應流向判定】
+        # 計算人體遮罩白塊的連通元件數量，用以評估是否過於破碎
+        num_labels, _, _, _ = cv2.connectedComponentsWithStats(person_bgs_mask, connectivity=8)
+        
+        # 閾值設定為 6 (即除去背景底色外，若有超過 5 個分散的小碎白塊，視為破碎)
+        if num_labels > 6:
+            detection_input = ori_img       # 遮罩品質不佳，改以原圖判斷
+        else:
+            detection_input = foreground_only  # 遮罩品質良好，維持去背圖判斷
+
         pose_results = pose_model(
-            ori_img,
+            detection_input,
             verbose=False,
             conf=0.3
         )
 
-        if len(pose_results[0].boxes) > 0:
-            pose_results[0].orig_img = annotated_frame
-            annotated_frame = pose_results[0].plot(boxes=False)
+        # ✨【核心修改點二：手動強制繪製骨架與連線】
+        if pose_results[0].keypoints is not None and len(pose_results[0].boxes) > 0:
+            kpts = pose_results[0].keypoints.xy.cpu().numpy()
 
-            pose_results[0].orig_img = bg_remove_render
-            bg_remove_render = pose_results[0].plot(boxes=False)
+            for person_kpts in kpts:
+                # 1. 繪製關鍵點點位（綠色圓點）
+                for point in person_kpts:
+                    kx, ky = int(point[0]), int(point[1])
+                    if kx > 0 and ky > 0:
+                        cv2.circle(bg_remove_render, (kx, ky), 3, (0, 255, 0), -1)
+                        cv2.circle(annotated_frame, (kx, ky), 3, (0, 255, 0), -1)
+                
+                # 2. 依據 COCO 定義強制連線（青黃色線條）
+                for conn in skeleton_connections:
+                    pt1_idx, pt2_idx = conn
+                    if pt1_idx < len(person_kpts) and pt2_idx < len(person_kpts):
+                        pt1 = person_kpts[pt1_idx]
+                        pt2 = person_kpts[pt2_idx]
+                        if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
+                            p1_coord = (int(pt1[0]), int(pt1[1]))
+                            p2_coord = (int(pt2[0]), int(pt2[1]))
+                            # 同步畫在去背圖與標註圖上
+                            cv2.line(bg_remove_render, p1_coord, p2_coord, (255, 255, 0), 2)
+                            cv2.line(annotated_frame, p1_coord, p2_coord, (255, 255, 0), 2)
 
         detected_people_boxes = []
         detected_keypoints_list = []
@@ -832,19 +865,44 @@ def analyze_one_frame(frame, mask, behavior_pack):
     bg_remove_render = foreground_only.copy()
     clean_frame = ori_img.copy() 
 
-    # 🔄【改回最穩定的寫法】Realtime API 偵測分支同步將輸入改回原始有背景的「ori_img」
+    # ✨【核心修改點三：即時 API 串流自適應流向判定】
+    num_labels, _, _, _ = cv2.connectedComponentsWithStats(person_bgs_mask, connectivity=8)
+    if num_labels > 6:
+        detection_input = ori_img
+    else:
+        detection_input = foreground_only
+
     pose_results = pose_model(
-        ori_img,
+        detection_input,
         verbose=False,
         conf=0.3
     )
 
-    if len(pose_results[0].boxes) > 0:
-        pose_results[0].orig_img = annotated_frame
-        annotated_frame = pose_results[0].plot(boxes=False)
+    skeleton_connections = [
+        (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13), 
+        (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 0), (0, 2), (0, 1)
+    ]
 
-        pose_results[0].orig_img = bg_remove_render
-        bg_remove_render = pose_results[0].plot(boxes=False)
+    # ✨【核心修改點四：即時 API 串流手動強制繪製骨架與連線】
+    if pose_results[0].keypoints is not None and len(pose_results[0].boxes) > 0:
+        kpts = pose_results[0].keypoints.xy.cpu().numpy()
+        for person_kpts in kpts:
+            for point in person_kpts:
+                kx, ky = int(point[0]), int(point[1])
+                if kx > 0 and ky > 0:
+                    cv2.circle(bg_remove_render, (kx, ky), 3, (0, 255, 0), -1)
+                    cv2.circle(annotated_frame, (kx, ky), 3, (0, 255, 0), -1)
+            
+            for conn in skeleton_connections:
+                pt1_idx, pt2_idx = conn
+                if pt1_idx < len(person_kpts) and pt2_idx < len(person_kpts):
+                    pt1 = person_kpts[pt1_idx]
+                    pt2 = person_kpts[pt2_idx]
+                    if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
+                        p1_coord = (int(pt1[0]), int(pt1[1]))
+                        p2_coord = (int(pt2[0]), int(pt2[1]))
+                        cv2.line(bg_remove_render, p1_coord, p2_coord, (255, 255, 0), 2)
+                        cv2.line(annotated_frame, p1_coord, p2_coord, (255, 255, 0), 2)
 
     detected_people_boxes = []
     detected_keypoints_list = []
