@@ -1,5 +1,6 @@
 import os
 import queue
+import json
 import threading
 import time
 import tkinter as tk
@@ -18,6 +19,7 @@ import test_new_HyRGB
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
 
 EVENT_LABELS = {
     "running": "奔跑",
@@ -138,12 +140,18 @@ class RunApp(tk.Tk):
         self.event_cover_refs = []
         self.selected_event = None
         self.event_cover_frame = None
+        self.show_new_only = tk.BooleanVar(value=False)
+        self.event_search = tk.StringVar(value="")
+        self.stopping = False
+        self.offline_progress_counts = (0, 0)
 
         self.image_refs = {}
 
         self._build_vars()
+        self._load_settings()
         self._build_ui()
         self._refresh_cameras()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(30, self._poll_results)
 
     def _setup_style(self):
@@ -201,6 +209,74 @@ class RunApp(tk.Tk):
         self.large_view_fill = tk.BooleanVar(value=False)
         self.offline_progress = tk.DoubleVar(value=0.0)
         self.offline_progress_text = tk.StringVar(value="尚未開始")
+
+    def _settings_vars(self):
+        return {
+            "base_dir": self.base_dir,
+            "roi_model_dir": self.roi_model_dir,
+            "dataset_dir": self.dataset_dir,
+            "output_dir": self.output_dir,
+            "background_path": self.background_path,
+            "camera_id": self.camera_id,
+            "save_mode": self.save_mode,
+            "offline_save_mode": self.offline_save_mode,
+            "varThreshold": self.varThreshold,
+            "active_ratio_threshold": self.active_ratio_threshold,
+            "active_indices_threshold": self.active_indices_threshold,
+            "active_indices_limit": self.active_indices_limit,
+            "learningRate": self.learningRate,
+            "update_interval": self.update_interval,
+            "batch_size": self.batch_size,
+            "foreground_threshold": self.foreground_threshold,
+            "auto_varThreshold": self.auto_varThreshold,
+            "varThreshold_min": self.varThreshold_min,
+            "varThreshold_max": self.varThreshold_max,
+            "varThreshold_step": self.varThreshold_step,
+            "active_ratio_spike": self.active_ratio_spike,
+            "active_ratio_drop": self.active_ratio_drop,
+            "active_ratio_smooth": self.active_ratio_smooth,
+            "crop_margin": self.crop_margin,
+            "display_fps": self.display_fps,
+            "display_delay_seconds": self.display_delay_seconds,
+            "playback_speed": self.playback_speed,
+            "large_view": self.large_view,
+            "large_view_fill": self.large_view_fill,
+        }
+
+    def _load_settings(self):
+        if not os.path.exists(SETTINGS_PATH):
+            return
+
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except Exception as exc:
+            print(f"設定檔讀取失敗: {exc}")
+            return
+
+        for key, var in self._settings_vars().items():
+            if key in data:
+                try:
+                    var.set(data[key])
+                except tk.TclError:
+                    pass
+
+    def _save_settings(self):
+        data = {key: var.get() for key, var in self._settings_vars().items()}
+
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+
+        self._log(f"設定已儲存: {SETTINGS_PATH}")
+
+    def _on_close(self):
+        try:
+            self._save_settings()
+        except Exception as exc:
+            self._log(f"設定儲存失敗: {exc}")
+
+        self.stop_event.set()
+        self.destroy()
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=10)
@@ -292,7 +368,12 @@ class RunApp(tk.Tk):
 
         controls = ttk.Frame(top)
         controls.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        ttk.Button(controls, text="開始即時", command=self.start_realtime).pack(
+        self.start_realtime_button = ttk.Button(
+            controls,
+            text="開始即時",
+            command=self.start_realtime
+        )
+        self.start_realtime_button.pack(
             side="left",
             padx=(0, 6)
         )
@@ -437,7 +518,12 @@ class RunApp(tk.Tk):
 
         controls = ttk.Frame(top)
         controls.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        ttk.Button(controls, text="開始資料夾分析", command=self.start_offline).pack(
+        self.start_offline_button = ttk.Button(
+            controls,
+            text="開始資料夾分析",
+            command=self.start_offline
+        )
+        self.start_offline_button.pack(
             side="left",
             padx=(0, 6)
         )
@@ -472,49 +558,87 @@ class RunApp(tk.Tk):
         info.pack(anchor="w", pady=10)
 
     def _build_params_tab(self):
-        frame = ttk.LabelFrame(self.params_tab, text="HyRGB 參數", padding=8)
-        frame.pack(fill="x")
-
-        params = [
-            ("varThreshold", self.varThreshold),
-            ("active_ratio_threshold", self.active_ratio_threshold),
-            ("active_indices_threshold", self.active_indices_threshold),
-            ("active_indices_limit", self.active_indices_limit),
-            ("learningRate", self.learningRate),
-            ("update_interval", self.update_interval),
-            ("batch_size", self.batch_size),
-            ("foreground_threshold", self.foreground_threshold),
-            ("crop_margin", self.crop_margin),
-            ("display_fps", self.display_fps),
-            ("display_delay_seconds", self.display_delay_seconds),
-            ("varThreshold_min", self.varThreshold_min),
-            ("varThreshold_max", self.varThreshold_max),
-            ("varThreshold_step", self.varThreshold_step),
-            ("active_ratio_spike", self.active_ratio_spike),
-            ("active_ratio_drop", self.active_ratio_drop),
-            ("active_ratio_smooth", self.active_ratio_smooth),
+        groups = [
+            (
+                "HyRGB 偵測參數",
+                [
+                    ("varThreshold", self.varThreshold),
+                    ("active_ratio_threshold", self.active_ratio_threshold),
+                    ("active_indices_threshold", self.active_indices_threshold),
+                    ("active_indices_limit", self.active_indices_limit),
+                    ("learningRate", self.learningRate),
+                    ("update_interval", self.update_interval),
+                    ("batch_size", self.batch_size),
+                    ("foreground_threshold", self.foreground_threshold),
+                ],
+            ),
+            (
+                "自動敏感度參數",
+                [
+                    ("varThreshold_min", self.varThreshold_min),
+                    ("varThreshold_max", self.varThreshold_max),
+                    ("varThreshold_step", self.varThreshold_step),
+                    ("active_ratio_spike", self.active_ratio_spike),
+                    ("active_ratio_drop", self.active_ratio_drop),
+                    ("active_ratio_smooth", self.active_ratio_smooth),
+                ],
+            ),
+            (
+                "GUI 播放參數",
+                [
+                    ("crop_margin", self.crop_margin),
+                    ("display_fps", self.display_fps),
+                    ("display_delay_seconds", self.display_delay_seconds),
+                    ("playback_speed", self.playback_speed),
+                ],
+            ),
+            (
+                "輸出 / 儲存參數",
+                [
+                    ("即時儲存模式", self.save_mode),
+                    ("資料夾儲存模式", self.offline_save_mode),
+                    ("輸出資料夾", self.output_dir),
+                    ("背景圖路徑", self.background_path),
+                ],
+            ),
         ]
 
-        for idx, (label, var) in enumerate(params):
-            ttk.Label(frame, text=label).grid(
-                row=idx,
-                column=0,
-                sticky="w",
-                pady=3
-            )
-            ttk.Entry(frame, textvariable=var, width=18).grid(
-                row=idx,
-                column=1,
-                sticky="w",
-                padx=8,
-                pady=3
+        for group_index, (title, params) in enumerate(groups):
+            frame = ttk.LabelFrame(self.params_tab, text=title, padding=8)
+            frame.grid(
+                row=group_index // 2,
+                column=group_index % 2,
+                sticky="nsew",
+                padx=6,
+                pady=6
             )
 
+            for idx, (label, var) in enumerate(params):
+                ttk.Label(frame, text=label).grid(row=idx, column=0, sticky="w", pady=3)
+                ttk.Entry(frame, textvariable=var, width=24).grid(
+                    row=idx,
+                    column=1,
+                    sticky="ew",
+                    padx=8,
+                    pady=3
+                )
+
+            frame.columnconfigure(1, weight=1)
+
         ttk.Checkbutton(
-            frame,
-            text="auto_varThreshold",
+            self.params_tab,
+            text="啟用自動調整 varThreshold",
             variable=self.auto_varThreshold
-        ).grid(row=len(params), column=0, columnspan=2, sticky="w", pady=6)
+        ).grid(row=2, column=0, sticky="w", padx=8, pady=8)
+
+        ttk.Button(
+            self.params_tab,
+            text="儲存設定",
+            command=self._save_settings
+        ).grid(row=2, column=1, sticky="e", padx=8, pady=8)
+
+        self.params_tab.columnconfigure(0, weight=1)
+        self.params_tab.columnconfigure(1, weight=1)
 
     def _build_log_tab(self):
         self.log_text = tk.Text(self.log_tab, height=20, wrap="word")
@@ -586,9 +710,42 @@ class RunApp(tk.Tk):
         top = ttk.LabelFrame(root, text="事件分類", padding=10)
         top.pack(fill="x")
 
+        tools = ttk.Frame(top)
+        tools.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
+        ttk.Label(tools, text="搜尋").pack(side="left")
+        search_entry = ttk.Entry(tools, textvariable=self.event_search, width=24)
+        search_entry.pack(side="left", padx=(6, 10))
+        search_entry.bind("<Return>", lambda _event: self.refresh_event_covers())
+        ttk.Checkbutton(
+            tools,
+            text="只看新事件",
+            variable=self.show_new_only,
+            command=self.refresh_event_covers
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            tools,
+            text="清除紅點",
+            command=self.clear_event_red_dots
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            tools,
+            text="清除封面列表",
+            command=self.clear_event_covers
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            tools,
+            text="開啟目前事件資料夾",
+            command=self.open_selected_event_folder
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            tools,
+            text="開啟全部事件資料夾",
+            command=self.open_all_event_folders
+        ).pack(side="left", padx=6)
+
         for col, (event_key, event_name) in enumerate(EVENT_LABELS.items()):
             box = ttk.Frame(top)
-            box.grid(row=0, column=col, padx=6, pady=4, sticky="n")
+            box.grid(row=1, column=col, padx=6, pady=4, sticky="n")
 
             button = ttk.Button(
                 box,
@@ -651,6 +808,45 @@ class RunApp(tk.Tk):
         if self.tabs.select() == str(self.events_tab):
             self._clear_event_alert()
 
+    def refresh_event_covers(self):
+        if self.selected_event is not None:
+            self.show_event_covers(self.selected_event)
+
+    def clear_event_red_dots(self):
+        self.event_seen.clear()
+        for event_key, items in self.event_items.items():
+            for item in items:
+                item["is_new"] = False
+            self.event_button_alerts[event_key].configure(text="")
+        self._clear_event_alert()
+        self.refresh_event_covers()
+        self._log("已清除事件紅點。")
+
+    def clear_event_covers(self):
+        if self.selected_event is None:
+            for event_key in self.event_items:
+                self.event_items[event_key].clear()
+                self.event_pages[event_key] = 0
+                self.event_button_alerts[event_key].configure(text="")
+        else:
+            self.event_items[self.selected_event].clear()
+            self.event_pages[self.selected_event] = 0
+            self.event_button_alerts[self.selected_event].configure(text="")
+
+        self.refresh_event_covers()
+        self._log("已清除事件封面列表。")
+
+    def open_selected_event_folder(self):
+        if self.selected_event is None:
+            messagebox.showinfo("事件資料夾", "請先選擇一種事件。")
+            return
+
+        self.open_folder(self._event_folder_for(self.selected_event))
+
+    def open_all_event_folders(self):
+        for event_key in EVENT_LABELS:
+            self.open_folder(self._event_folder_for(event_key))
+
     def _event_folder_for(self, event_key):
         event_dir = EVENT_DIR_NAMES.get(event_key, event_key.upper())
         return os.path.join(
@@ -691,7 +887,7 @@ class RunApp(tk.Tk):
             )
         )
 
-    def _create_event_video(self, event_key, result):
+    def _create_event_video(self, event_key, result, event_time=None):
         image = result.get("view1_box_only")
 
         if image is None:
@@ -707,11 +903,18 @@ class RunApp(tk.Tk):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 10.0
         writer = cv2.VideoWriter(video_path, fourcc, fps, (320, 240))
-        cutoff = time.time() - 10
+
+        if event_time is None:
+            start_time = time.time() - 10
+            end_time = time.time()
+        else:
+            start_time = event_time - 5
+            end_time = event_time + 5
+
         frames = [
             frame
             for ts, _, frame in self.event_frame_buffer
-            if ts >= cutoff
+            if start_time <= ts <= end_time
         ]
 
         if not frames:
@@ -732,6 +935,17 @@ class RunApp(tk.Tk):
         writer.release()
 
         return video_path
+
+    def _finalize_event_item(self, event_key, item, result, event_time):
+        item["video_path"] = self._create_event_video(
+            event_key,
+            result,
+            event_time=event_time
+        )
+        self.event_items[event_key].append(item)
+
+        if self.selected_event == event_key:
+            self.show_event_covers(event_key)
 
     def _handle_result_events(self, result):
         triggers = result.get("frame_triggers", {})
@@ -766,14 +980,11 @@ class RunApp(tk.Tk):
                 "frame_idx": result.get("frame_idx", len(self.event_items[event_key])),
                 "image": result.get("view1_box_only"),
                 "is_new": True,
-                "video_path": self._create_event_video(event_key, result),
+                "video_path": None,
                 "folder_path": self._event_folder_for(event_key)
             }
 
-            self.event_items[event_key].append(item)
-
-            if self.selected_event == event_key:
-                self.show_event_covers(event_key)
+            self.after(5000, self._finalize_event_item, event_key, item, result, now)
 
     def show_event_covers(self, event_key):
         self.selected_event = event_key
@@ -784,7 +995,23 @@ class RunApp(tk.Tk):
 
         self.event_cover_refs.clear()
 
-        items = self.event_items.get(event_key, [])
+        items = list(self.event_items.get(event_key, []))
+        keyword = self.event_search.get().strip().lower()
+
+        if self.show_new_only.get():
+            items = [item for item in items if item.get("is_new")]
+
+        if keyword:
+            event_name = EVENT_LABELS[event_key].lower()
+            items = [
+                item for item in items
+                if (
+                    keyword in event_name
+                    or keyword in str(item.get("frame_idx", "")).lower()
+                    or keyword in os.path.basename(item.get("video_path") or "").lower()
+                )
+            ]
+
         per_page = 4
         total_pages = max(1, (len(items) + per_page - 1) // per_page)
         page = min(self.event_pages.get(event_key, 0), total_pages - 1)
@@ -953,6 +1180,15 @@ class RunApp(tk.Tk):
             self._log(f"效能監控已儲存: {self.monitor.save_path}")
             self.monitor = None
 
+    def _set_running_state(self, running):
+        state = "disabled" if running else "normal"
+
+        if hasattr(self, "start_realtime_button"):
+            self.start_realtime_button.configure(state=state)
+
+        if hasattr(self, "start_offline_button"):
+            self.start_offline_button.configure(state=state)
+
     def toggle_playback(self):
         self.playback_paused.set(not self.playback_paused.get())
         status = "暫停顯示" if self.playback_paused.get() else "繼續播放"
@@ -1013,6 +1249,8 @@ class RunApp(tk.Tk):
             return
 
         self.stop_event.clear()
+        self.stopping = False
+        self._set_running_state(True)
         self.output_buffer.clear()
         self.playback_results = []
         self.playback_index = 0
@@ -1125,6 +1363,8 @@ class RunApp(tk.Tk):
             if cap is not None:
                 cap.release()
             self._stop_monitor()
+            self.stopping = False
+            self.after(0, self._set_running_state, False)
             self._log("即時模式已停止。")
 
     def _poll_results(self):
@@ -1234,6 +1474,9 @@ class RunApp(tk.Tk):
             return
 
         self.stop_event.clear()
+        self.stopping = False
+        self._set_running_state(True)
+        self.offline_progress_counts = (0, 0)
         self.output_buffer.clear()
         self.playback_results = []
         self.playback_index = 0
@@ -1275,6 +1518,7 @@ class RunApp(tk.Tk):
 
             def update_progress(done, total):
                 percent = 0 if total == 0 else (done / total) * 100
+                self.offline_progress_counts = (done, total)
                 self.after(
                     0,
                     lambda: (
@@ -1297,6 +1541,8 @@ class RunApp(tk.Tk):
             )
 
             if self.stop_event.is_set():
+                done, total = self.offline_progress_counts
+                self.after(0, self.offline_progress_text.set, f"已停止 {done}/{total}")
                 self._log("資料夾分析已停止。")
 
             else:
@@ -1311,11 +1557,22 @@ class RunApp(tk.Tk):
         finally:
             self.offline_processing = False
             self._stop_monitor()
+            self.stopping = False
+            self.after(0, self._set_running_state, False)
 
     def stop_current(self):
+        if self.stopping:
+            return
+
+        self.stopping = True
         self.stop_event.set()
-        self._log("已要求停止。")
-        messagebox.showinfo("停止", "已停止。")
+        done, total = self.offline_progress_counts
+
+        if total:
+            self.offline_progress_text.set(f"正在停止 {done}/{total}")
+
+        self._log("正在停止，等待工作結束。")
+        messagebox.showinfo("停止", "正在停止，完成目前工作後會結束。")
 
     def _log(self, message):
         if hasattr(self, "logger"):
