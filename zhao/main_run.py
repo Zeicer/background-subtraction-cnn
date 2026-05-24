@@ -40,8 +40,11 @@ def new_hyrgb_run(
     roi_model_dir,
     input_picture,
     mask_dir="result_mask",
-    save_mode="none"
+    save_mode="none",
+    hyrgb_params=None
 ):
+    if hyrgb_params is None:
+        hyrgb_params = {}
 
     test_new_HyRGB.run_hyrgb(
         base_dir=base_dir,
@@ -49,7 +52,8 @@ def new_hyrgb_run(
         roi_model_dir=roi_model_dir,
         input_picture=input_picture,
         ghz_mask_dir=mask_dir,
-        save_mode=save_mode
+        save_mode=save_mode,
+        **hyrgb_params
     )
 
 def behavior_analyzer(base_dir,input_dir,mask_dir,output_dir):
@@ -64,7 +68,8 @@ def run(
     dataset,
     roi_model_dir,
     behavior_analyzer_output_dir,
-    mode = "all"
+    mode = "all",
+    hyrgb_params=None
 ):
     log_dir = os.path.join(base_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -83,7 +88,8 @@ def run(
             roi_model_dir,
             input_picture=frame_id,
             mask_dir=f"{name}_result_mask",
-            save_mode=mode
+            save_mode=mode,
+            hyrgb_params=hyrgb_params
         )
 
         behavior_analyzer(base_dir=base_dir,
@@ -98,6 +104,22 @@ if __name__ == "__main__":
     behavior_analyzer_output_dir="11111/combined_results"#行為分析輸出資料夾位置
     #輸入資料夾名字放dataset
     dataset = ["pic_obalanuwalk"]
+    hyrgb_params = {
+        "varThreshold": 30,
+        "active_ratio_threshold": 0.35,
+        "active_indices_threshold": 225,
+        "active_indices_limit": 8000,
+        "learningRate": 0.001,
+        "update_interval": 1,
+        "batch_size": 2048,
+        "auto_varThreshold": True,
+        "varThreshold_min": 8,
+        "varThreshold_max": 64,
+        "varThreshold_step": 2,
+        "active_ratio_spike": 0.20,
+        "active_ratio_drop": 0.08,
+        "active_ratio_smooth": 0.4
+    }
 
     log_dir = os.path.join(base_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -117,7 +139,8 @@ if __name__ == "__main__":
             dataset=dataset,
             roi_model_dir=roi_model_dir,
             behavior_analyzer_output_dir=behavior_analyzer_output_dir,
-            mode="all"
+            mode="all",
+            hyrgb_params=hyrgb_params
         )
     finally:
         monitor.stop()

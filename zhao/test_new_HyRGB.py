@@ -104,9 +104,70 @@ def make_rgb_patches_from_rgb(
 
 class SceneCache:
 
-    def __init__(self, max_size=10):
+    def __init__(self, max_size=10, cache_path=None):
         self.cache = OrderedDict()
         self.max_size = max_size
+        self.cache_path = None
+
+        if cache_path is not None:
+            self.set_cache_path(cache_path)
+
+    def set_cache_path(self, cache_path):
+        if self.cache_path == cache_path:
+            return
+
+        self.cache_path = cache_path
+        self.cache.clear()
+        self.load_from_txt()
+
+    def load_from_txt(self):
+        if (
+            self.cache_path is None
+            or not os.path.exists(self.cache_path)
+        ):
+            return
+
+        with open(self.cache_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+
+                if not line or "\t" not in line:
+                    continue
+
+                scene_id, channels_text = line.split("\t", 1)
+                channels = []
+
+                for value in channels_text.split(","):
+                    value = value.strip()
+
+                    if value:
+                        channels.append(int(value))
+
+                if len(channels) < 2:
+                    continue
+
+                if len(self.cache) >= self.max_size:
+                    self.cache.popitem(last=False)
+
+                self.cache[scene_id] = channels[:2]
+
+        print(f"Loaded scene cache: {self.cache_path}")
+
+    def save_to_txt(self):
+        if self.cache_path is None:
+            return
+
+        os.makedirs(
+            os.path.dirname(self.cache_path),
+            exist_ok=True
+        )
+
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            for scene_id, channels in self.cache.items():
+                channels_text = ",".join(
+                    str(ch) for ch in channels
+                )
+                f.write(f"{scene_id}\t{channels_text}\n")
 
     def get_channels(self, scene_id):
         if scene_id in self.cache:
@@ -121,6 +182,7 @@ class SceneCache:
             self.cache.popitem(last=False)
 
         self.cache[scene_id] = channels
+        self.save_to_txt()
         print(f"已存儲場景 {scene_id} 的最佳通道: {channels}")
 
 
@@ -139,7 +201,18 @@ class HybridBGSSystem:
         update_interval,
         varThreshold,
         scene_cache,
-        active_ratio_threshold=0.35
+        active_ratio_threshold=0.35,
+        active_indices_threshold=200,
+        active_indices_limit=8000,
+        learningRate=0.001,
+        batch_size=2048,
+        auto_varThreshold=False,
+        varThreshold_min=8,
+        varThreshold_max=64,
+        varThreshold_step=2,
+        active_ratio_spike=0.20,
+        active_ratio_drop=0.08,
+        active_ratio_smooth=0.4
     ):
 
         self.cnn_model = cnn_model.to(device).eval()
@@ -149,10 +222,23 @@ class HybridBGSSystem:
         self.device = device
 
         self.active_ratio_threshold = active_ratio_threshold
+        self.active_indices_threshold = active_indices_threshold
+        self.active_indices_limit = active_indices_limit
+        self.learningRate = learningRate
+        self.batch_size = batch_size
+        self.varThreshold = varThreshold
+        self.auto_varThreshold = auto_varThreshold
+        self.varThreshold_min = varThreshold_min
+        self.varThreshold_max = varThreshold_max
+        self.varThreshold_step = varThreshold_step
+        self.active_ratio_spike = active_ratio_spike
+        self.active_ratio_drop = active_ratio_drop
+        self.active_ratio_smooth = active_ratio_smooth
+        self.prev_active_ratio = None
 
         self.fgbg = cv2.createBackgroundSubtractorMOG2(
             history=300,
-            varThreshold=varThreshold,
+            varThreshold=self.varThreshold,
             detectShadows=False
         )
 
@@ -302,6 +388,39 @@ class HybridBGSSystem:
     # VGG + MOG2
     # =====================================================
 
+    def adjust_varThreshold(self, active_ratio):
+        if not self.auto_varThreshold:
+            return
+
+        if self.prev_active_ratio is None:
+            self.prev_active_ratio = active_ratio
+            return
+
+        delta = active_ratio - self.prev_active_ratio
+        new_varThreshold = self.varThreshold
+
+        if delta > self.active_ratio_spike:
+            new_varThreshold += self.varThreshold_step
+
+        elif delta < -self.active_ratio_drop:
+            new_varThreshold -= self.varThreshold_step
+
+        new_varThreshold = max(
+            self.varThreshold_min,
+            min(self.varThreshold_max, new_varThreshold)
+        )
+
+        if new_varThreshold != self.varThreshold:
+            self.varThreshold = new_varThreshold
+            self.fgbg.setVarThreshold(self.varThreshold)
+            print(f"Auto varThreshold: {self.varThreshold}")
+
+        smooth = self.active_ratio_smooth
+        self.prev_active_ratio = (
+            smooth * active_ratio
+            + (1.0 - smooth) * self.prev_active_ratio
+        )
+
     def get_vgg_enhanced_frame(self, frame):
 
         if (
@@ -347,7 +466,10 @@ class HybridBGSSystem:
             0
         )
 
-        raw_mask = self.fgbg.apply(enhanced_frame,learningRate=0.001)
+        raw_mask = self.fgbg.apply(
+            enhanced_frame,
+            learningRate=self.learningRate
+        )
 
         return raw_mask
 
@@ -435,7 +557,7 @@ class HybridBGSSystem:
         )
 
         preds = []
-        batch_size = 2048
+        batch_size = self.batch_size
 
         with torch.no_grad():
 
@@ -516,10 +638,11 @@ class HybridBGSSystem:
 
             # 建議用 > 200，避開 MOG2 shadow=127
             temp_active_indices = np.where(
-                small_mask.flatten() > 200
+                small_mask.flatten() > self.active_indices_threshold
             )[0]
 
             active_ratio = len(temp_active_indices) / total_pixels
+            self.adjust_varThreshold(active_ratio)
 
             print(
                 f"ROI active: {len(temp_active_indices)} | "
@@ -568,10 +691,10 @@ class HybridBGSSystem:
             ), 0
 
         # ROI 模式才限制 8000
-        if len(active_indices) > 8000:
+        if len(active_indices) > self.active_indices_limit:
             active_indices = np.random.choice(
                 active_indices,
-                8000,
+                self.active_indices_limit,
                 replace=False
             )
 
@@ -599,7 +722,7 @@ class HybridBGSSystem:
         t4 = time.perf_counter()
 
         preds = []
-        batch_size = 2048
+        batch_size = self.batch_size
 
         with torch.no_grad():
 
@@ -686,7 +809,21 @@ global_scene_cache = SceneCache(max_size=10)
 # =========================================================
 
 def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = "ghz_mask1/mask",
-            save_mode = "all"):
+            save_mode = "all",
+            varThreshold = 24,
+            active_ratio_threshold = 0.35,
+            active_indices_threshold = 200,
+            active_indices_limit = 8000,
+            learningRate = 0.001,
+            update_interval = 1,
+            batch_size = 2048,
+            auto_varThreshold = False,
+            varThreshold_min = 8,
+            varThreshold_max = 64,
+            varThreshold_step = 2,
+            active_ratio_spike = 0.20,
+            active_ratio_drop = 0.08,
+            active_ratio_smooth = 0.4):
 
     device = torch.device(
         "cuda"
@@ -696,10 +833,7 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
 
     print("使用裝置:", device)
 
-    update_interval = 1
-    varThreshold = 24
     num_classes = 2
-    active_ratio_threshold = 0.35
 
     # base_dir = "./dataset/room"
     # data_dir = "pic_obalanuwalk"
@@ -709,6 +843,12 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
     # 這裡改成你的純 LeNet 權重
     # full_lenet_model_path = "./batch_pth/best_model_step130000_lagi_lagi_patch.pth"
     full_lenet_model_dir = roi_model_dir
+    scene_cache_path = os.path.join(
+        base_dir,
+        "scene_channel_cache.txt"
+    )
+    global_scene_cache.set_cache_path(scene_cache_path)
+
     # ghz_mask_dir = "ghz_mask1/mask"
     # input_picture = range(0, 915)
     if input_picture is None:
@@ -812,7 +952,18 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
         update_interval=update_interval,
         varThreshold=varThreshold,
         scene_cache=global_scene_cache,
-        active_ratio_threshold=active_ratio_threshold
+        active_ratio_threshold=active_ratio_threshold,
+        active_indices_threshold=active_indices_threshold,
+        active_indices_limit=active_indices_limit,
+        learningRate=learningRate,
+        batch_size=batch_size,
+        auto_varThreshold=auto_varThreshold,
+        varThreshold_min=varThreshold_min,
+        varThreshold_max=varThreshold_max,
+        varThreshold_step=varThreshold_step,
+        active_ratio_spike=active_ratio_spike,
+        active_ratio_drop=active_ratio_drop,
+        active_ratio_smooth=active_ratio_smooth
     )
 
     # =====================================================
@@ -985,12 +1136,28 @@ def init_hyrgb_system(
         scene_id = "realtime",
         update_interval = 1,
         varThreshold = 16,
-        active_ratio_threshold=0.35
+        active_ratio_threshold=0.35,
+        active_indices_threshold=200,
+        active_indices_limit=8000,
+        learningRate=0.001,
+        batch_size=2048,
+        auto_varThreshold=False,
+        varThreshold_min=8,
+        varThreshold_max=64,
+        varThreshold_step=2,
+        active_ratio_spike=0.20,
+        active_ratio_drop=0.08,
+        active_ratio_smooth=0.4
 ):
     device = torch.device("cuda"if torch.cuda.is_available() else "cpu")
     print("使用裝置:", device)
     num_classes = 2
     full_lenet_model_dir = roi_model_dir
+    scene_cache_path = os.path.join(
+        base_dir,
+        "scene_channel_cache.txt"
+    )
+    global_scene_cache.set_cache_path(scene_cache_path)
 
     if background_path is None:
         background_path = os.path.join(
@@ -1060,7 +1227,18 @@ def init_hyrgb_system(
         update_interval=update_interval,
         varThreshold=varThreshold,
         scene_cache=global_scene_cache,
-        active_ratio_threshold=active_ratio_threshold
+        active_ratio_threshold=active_ratio_threshold,
+        active_indices_threshold=active_indices_threshold,
+        active_indices_limit=active_indices_limit,
+        learningRate=learningRate,
+        batch_size=batch_size,
+        auto_varThreshold=auto_varThreshold,
+        varThreshold_min=varThreshold_min,
+        varThreshold_max=varThreshold_max,
+        varThreshold_step=varThreshold_step,
+        active_ratio_spike=active_ratio_spike,
+        active_ratio_drop=active_ratio_drop,
+        active_ratio_smooth=active_ratio_smooth
     )
 
     if calibration_frames is not None and len(calibration_frames) > 0:
@@ -1112,7 +1290,4 @@ def infer_one_frame(
 # =========================================================
 
 if __name__ == "__main__":
-    run_hyrgb(base_dir="./dataset/room",
-        data_dir="pic_obalanuwalk",
-        roi_model_dir=r"C:\zeicer\room\batch_pth"
-        )
+    print("請使用 main_run.py 或 realtime_run.py 呼叫此模組")
