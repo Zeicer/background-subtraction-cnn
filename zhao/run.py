@@ -125,6 +125,9 @@ class RunApp(tk.Tk):
         self.large_panel = None
         self.large_view_key = None
         self.event_alert = False
+        self.display_frame_count = 0
+        self.fps_last_time = time.perf_counter()
+        self.current_display_fps = tk.StringVar(value="顯示 FPS: 0.0")
         self.event_buttons = {}
         self.event_button_alerts = {}
         self.event_items = {event: [] for event in EVENT_LABELS}
@@ -372,6 +375,13 @@ class RunApp(tk.Tk):
             images.columnconfigure(col, weight=1)
         for row in range(2):
             images.rowconfigure(row, weight=1)
+
+        fps_bar = ttk.Frame(self.realtime_tab)
+        fps_bar.pack(fill="x", pady=(4, 0))
+        ttk.Label(
+            fps_bar,
+            textvariable=self.current_display_fps
+        ).pack(side="left")
 
     def _build_offline_tab(self):
         top = ttk.LabelFrame(self.offline_tab, text="資料夾模式設定", padding=8)
@@ -1097,9 +1107,21 @@ class RunApp(tk.Tk):
                         self.last_result.get(self.large_view_key)
                     )
 
+                self._update_display_fps(now)
+
             self.last_display_time = now
 
         self.after(30, self._poll_results)
+
+    def _update_display_fps(self, now):
+        self.display_frame_count += 1
+        elapsed = now - self.fps_last_time
+
+        if elapsed >= 1.0:
+            fps = self.display_frame_count / elapsed
+            self.current_display_fps.set(f"顯示 FPS: {fps:.1f}")
+            self.display_frame_count = 0
+            self.fps_last_time = now
 
     def capture_background(self):
         if not self.camera_id.get():
