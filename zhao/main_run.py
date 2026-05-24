@@ -71,6 +71,7 @@ def run_streaming_dataset(
     data_dir,
     roi_model_dir,
     output_dir,
+    background_path=None,
     save_mode="all",
     hyrgb_params=None,
     result_callback=None,
@@ -80,12 +81,93 @@ def run_streaming_dataset(
         hyrgb_params = {}
 
     input_picture = picture_name(base_dir, data_dir)
-    background_path = os.path.join(base_dir, "background.jpg")
+
+    if background_path is None:
+        background_path = os.path.join(base_dir, "background.jpg")
 
     if not os.path.exists(background_path):
         raise FileNotFoundError(f"Missing background image: {background_path}")
 
     os.makedirs(output_dir, exist_ok=True)
+    mask_save_dir = os.path.join(
+        base_dir,
+        "maskpicture",
+        f"{data_dir}_result_mask"
+    )
+    mask_video_dir = os.path.join(
+        base_dir,
+        "maskpicture",
+        "mask_video"
+    )
+    save_1111_dir = os.path.join(base_dir, "1111")
+    behavior_main_dir = os.path.join(
+        base_dir,
+        "11111",
+        "fivebehavior_videos"
+    )
+    combined_results_dir = os.path.join(
+        base_dir,
+        "11111",
+        "combined_results"
+    )
+    behavior_dirs = {
+        "running": os.path.join(behavior_main_dir, "RUNNING"),
+        "loiter": os.path.join(behavior_main_dir, "LOITERING"),
+        "faint": os.path.join(behavior_main_dir, "FAINT"),
+        "collision": os.path.join(behavior_main_dir, "COLLISION"),
+        "litter": os.path.join(behavior_main_dir, "LITTERING")
+    }
+    save_dirs = {
+        "view1_box_only": os.path.join(output_dir, "view1_box_only"),
+        "view2_skeleton": os.path.join(output_dir, "view2_skeleton"),
+        "view3_mask_overlay": os.path.join(output_dir, "view3_mask_overlay"),
+        "view4_mask": os.path.join(output_dir, "view4_mask"),
+        "view5_original": os.path.join(output_dir, "view5_original"),
+        "event": os.path.join(output_dir, "event")
+    }
+
+    for save_dir in [
+        mask_save_dir,
+        mask_video_dir,
+        save_1111_dir,
+        combined_results_dir,
+        *behavior_dirs.values(),
+        *save_dirs.values()
+    ]:
+        os.makedirs(save_dir, exist_ok=True)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    video_size = (320, 240)
+    mask_video = cv2.VideoWriter(
+        os.path.join(mask_video_dir, "mask_video.mp4"),
+        fourcc,
+        10.0,
+        video_size
+    )
+    out_v1 = cv2.VideoWriter(
+        os.path.join(save_1111_dir, "1_geometry_mask.mp4"),
+        fourcc,
+        20.0,
+        video_size
+    )
+    out_v2 = cv2.VideoWriter(
+        os.path.join(save_1111_dir, "2_ultimate_monitor.mp4"),
+        fourcc,
+        20.0,
+        video_size
+    )
+    out_v3 = cv2.VideoWriter(
+        os.path.join(save_1111_dir, "3_foreground_debug.mp4"),
+        fourcc,
+        20.0,
+        video_size
+    )
+    out_v4 = cv2.VideoWriter(
+        os.path.join(save_1111_dir, "4_clean_monitor.mp4"),
+        fourcc,
+        20.0,
+        video_size
+    )
 
     calibration_frames = []
 
@@ -106,54 +188,121 @@ def run_streaming_dataset(
 
     behavior_pack = finalsecond.init_behavior_system()
 
-    for frame_idx, img_path in enumerate(input_picture):
-        if stop_event is not None and stop_event.is_set():
-            break
+    try:
+        for frame_idx, img_path in enumerate(input_picture):
+            if stop_event is not None and stop_event.is_set():
+                break
 
-        frame = cv2.imread(img_path)
+            frame = cv2.imread(img_path)
 
-        if frame is None:
-            continue
+            if frame is None:
+                continue
 
-        frame = cv2.resize(frame, (320, 240))
+            frame = cv2.resize(frame, (320, 240))
+            filename = os.path.basename(img_path)
+            name = os.path.splitext(filename)[0]
 
-        mask_img, active_count = test_new_HyRGB.infer_one_frame(
-            hyrgb_system,
-            bg_img,
-            frame
-        )
+            mask_img, active_count = test_new_HyRGB.infer_one_frame(
+                hyrgb_system,
+                bg_img,
+                frame
+            )
 
-        mask_np = np.array(mask_img)
+            mask_np = np.array(mask_img)
 
-        if len(mask_np.shape) == 3:
-            mask_np = cv2.cvtColor(mask_np, cv2.COLOR_RGB2GRAY)
+            if len(mask_np.shape) == 3:
+                mask_np = cv2.cvtColor(mask_np, cv2.COLOR_RGB2GRAY)
 
-        result_views = finalsecond.analyze_one_frame(
-            frame,
-            mask_np,
-            behavior_pack
-        )
+            mask_path = os.path.join(mask_save_dir, f"{name}_mask.png")
 
-        result = {
-            "frame_idx": frame_idx,
-            "image_path": img_path,
-            "view1_box_only": result_views["view1_box_only"],
-            "view2_skeleton": result_views["view2_skeleton"],
-            "view3_mask_overlay": result_views["view3_mask_overlay"],
-            "view4_mask": result_views["view4_mask"],
-            "view5_original": result_views["view5_original"],
-            "frame_triggers": result_views["frame_triggers"]
-        }
+            if save_mode in ("all", "event"):
+                Image.fromarray(mask_np).save(mask_path)
 
-        if result_callback is not None:
-            result_callback(result)
+            mask_video.write(cv2.cvtColor(mask_np, cv2.COLOR_GRAY2BGR))
 
-        has_event = any(result["frame_triggers"].values())
+            result_views = finalsecond.analyze_one_frame(
+                frame,
+                mask_np,
+                behavior_pack
+            )
 
-        if save_mode == "all" or (save_mode == "event" and has_event):
-            name = os.path.splitext(os.path.basename(img_path))[0]
-            save_path = os.path.join(output_dir, f"{name}_behavior.jpg")
-            cv2.imwrite(save_path, result["view2_skeleton"])
+            result = {
+                "frame_idx": frame_idx,
+                "image_path": img_path,
+                "view1_box_only": result_views["view1_box_only"],
+                "view2_skeleton": result_views["view2_skeleton"],
+                "view3_mask_overlay": result_views["view3_mask_overlay"],
+                "view4_mask": result_views["view4_mask"],
+                "view5_original": result_views["view5_original"],
+                "frame_triggers": result_views["frame_triggers"]
+            }
+
+            out_v1.write(result["view4_mask"])
+            out_v2.write(result["view2_skeleton"])
+            out_v3.write(result["view3_mask_overlay"])
+            out_v4.write(result["view1_box_only"])
+
+            if result_callback is not None:
+                result_callback(result)
+
+            has_event = any(result["frame_triggers"].values())
+
+            if save_mode == "all" or (save_mode == "event" and has_event):
+                if save_mode == "all":
+                    for view_key, save_dir in save_dirs.items():
+                        if view_key == "event":
+                            continue
+
+                        cv2.imwrite(
+                            os.path.join(save_dir, f"{name}.jpg"),
+                            result[view_key]
+                        )
+
+                    cv2.imwrite(
+                        os.path.join(output_dir, f"behavior_{name}.jpg"),
+                        result["view2_skeleton"]
+                    )
+                    cv2.imwrite(
+                        os.path.join(
+                            combined_results_dir,
+                            f"behavior_{name}.jpg"
+                        ),
+                        result["view2_skeleton"]
+                    )
+
+                if has_event:
+                    cv2.imwrite(
+                        os.path.join(save_dirs["event"], f"{name}_event.jpg"),
+                        result["view2_skeleton"]
+                    )
+                    cv2.imwrite(
+                        os.path.join(output_dir, f"event_behavior_{name}.jpg"),
+                        result["view2_skeleton"]
+                    )
+                    cv2.imwrite(
+                        os.path.join(
+                            combined_results_dir,
+                            f"event_behavior_{name}.jpg"
+                        ),
+                        result["view2_skeleton"]
+                    )
+
+                    for behavior_name, triggered in result["frame_triggers"].items():
+                        if triggered and behavior_name in behavior_dirs:
+                            cv2.imwrite(
+                                os.path.join(
+                                    behavior_dirs[behavior_name],
+                                    f"{name}_{behavior_name}.jpg"
+                                ),
+                                result["view2_skeleton"]
+                            )
+
+    finally:
+        mask_video.release()
+        out_v1.release()
+        out_v2.release()
+        out_v3.release()
+        out_v4.release()
 
     return True
 

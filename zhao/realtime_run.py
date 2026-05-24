@@ -227,18 +227,28 @@ def process_realtime_frame(
 
 
 def save_event_frame(result, save_mode, event_dir):
-    annotated_frame = result["view1_box_only"]
     frame_idx = result["frame_idx"]
     frame_triggers = result["frame_triggers"]
     has_event = any(frame_triggers.values())
+    view_keys = [
+        "view1_box_only",
+        "view2_skeleton",
+        "view3_mask_overlay",
+        "view4_mask",
+        "view5_original"
+    ]
 
     if save_mode == "all":
-        save_path = os.path.join(
-            event_dir,
-            f"frame_{frame_idx:06d}.jpg"
-        )
+        for view_key in view_keys:
+            save_dir = os.path.join(event_dir, view_key)
+            os.makedirs(save_dir, exist_ok=True)
 
-        cv2.imwrite(save_path, annotated_frame)
+            save_path = os.path.join(
+                save_dir,
+                f"frame_{frame_idx:06d}.jpg"
+            )
+
+            cv2.imwrite(save_path, result[view_key])
 
     elif save_mode == "event" and has_event:
         event_names = [
@@ -249,13 +259,15 @@ def save_event_frame(result, save_mode, event_dir):
 
         event_text = "_".join(event_names)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(event_dir, "event")
+        os.makedirs(save_dir, exist_ok=True)
 
         save_path = os.path.join(
-            event_dir,
+            save_dir,
             f"event_{event_text}_{timestamp}_frame_{frame_idx:06d}.jpg"
         )
 
-        cv2.imwrite(save_path, annotated_frame)
+        cv2.imwrite(save_path, result["view2_skeleton"])
         print(f"事件觸發，已存圖: {save_path}")
 
 

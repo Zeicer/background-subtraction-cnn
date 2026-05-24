@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import finalsecond
+from function_monitor import PerformanceMonitor
 import main_run
 import realtime_run
 import test_new_HyRGB
@@ -62,17 +63,22 @@ class RunApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("HyRGB Behavior Monitor")
+        self.title("HyRGB 行為監控系統")
         self.geometry("1320x860")
         self.minsize(1100, 720)
+        self._setup_style()
 
         self.stop_event = threading.Event()
         self.realtime_thread = None
         self.offline_thread = None
+        self.monitor = None
         self.result_queue = queue.Queue(maxsize=8)
         self.output_buffer = deque(maxlen=8)
         self.last_result = None
         self.last_display_time = 0.0
+        self.large_window = None
+        self.large_panel = None
+        self.large_view_key = None
 
         self.image_refs = {}
 
@@ -80,6 +86,17 @@ class RunApp(tk.Tk):
         self._build_ui()
         self._refresh_cameras()
         self.after(30, self._poll_results)
+
+    def _setup_style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TFrame", background="#f5f7fb")
+        style.configure("TLabelframe", background="#f5f7fb")
+        style.configure("TLabelframe.Label", font=("Microsoft JhengHei UI", 10, "bold"))
+        style.configure("TLabel", background="#f5f7fb", font=("Microsoft JhengHei UI", 10))
+        style.configure("TButton", font=("Microsoft JhengHei UI", 10), padding=6)
+        style.configure("TNotebook", background="#eef2f7")
+        style.configure("TNotebook.Tab", font=("Microsoft JhengHei UI", 10), padding=(14, 7))
 
     def _build_vars(self):
         self.base_dir = tk.StringVar(value=APP_DIR)
@@ -119,6 +136,9 @@ class RunApp(tk.Tk):
         self.crop_margin = tk.IntVar(value=50)
         self.display_fps = tk.DoubleVar(value=10)
         self.display_delay_seconds = tk.DoubleVar(value=0.5)
+        self.playback_paused = tk.BooleanVar(value=False)
+        self.playback_speed = tk.DoubleVar(value=1.0)
+        self.large_view = tk.StringVar(value="view2_skeleton")
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=10)
@@ -132,10 +152,10 @@ class RunApp(tk.Tk):
         self.params_tab = ttk.Frame(self.tabs, padding=8)
         self.log_tab = ttk.Frame(self.tabs, padding=8)
 
-        self.tabs.add(self.realtime_tab, text="Realtime")
-        self.tabs.add(self.offline_tab, text="Offline Folder")
-        self.tabs.add(self.params_tab, text="Params")
-        self.tabs.add(self.log_tab, text="Log")
+        self.tabs.add(self.realtime_tab, text="即時模式")
+        self.tabs.add(self.offline_tab, text="資料夾模式")
+        self.tabs.add(self.params_tab, text="參數設定")
+        self.tabs.add(self.log_tab, text="執行紀錄")
 
         self._build_realtime_tab()
         self._build_offline_tab()
@@ -146,7 +166,7 @@ class RunApp(tk.Tk):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
         entry = ttk.Entry(parent, textvariable=var)
         entry.grid(row=row, column=1, sticky="ew", padx=6, pady=3)
-        ttk.Button(parent, text="Browse", command=command).grid(
+        ttk.Button(parent, text="選擇", command=command).grid(
             row=row,
             column=2,
             sticky="ew",
@@ -155,32 +175,32 @@ class RunApp(tk.Tk):
         parent.columnconfigure(1, weight=1)
 
     def _build_realtime_tab(self):
-        top = ttk.LabelFrame(self.realtime_tab, text="Realtime Settings", padding=8)
+        top = ttk.LabelFrame(self.realtime_tab, text="即時模式設定", padding=8)
         top.pack(fill="x")
 
         self._build_path_row(
             top,
             0,
-            "Base folder",
+            "基礎資料夾",
             self.base_dir,
             lambda: self._choose_folder(self.base_dir)
         )
         self._build_path_row(
             top,
             1,
-            "ROI model folder",
+            "ROI 模型資料夾",
             self.roi_model_dir,
             lambda: self._choose_folder(self.roi_model_dir)
         )
         self._build_path_row(
             top,
             2,
-            "Background image",
+            "背景圖路徑",
             self.background_path,
             lambda: self._choose_file(self.background_path)
         )
 
-        ttk.Label(top, text="Camera").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(top, text="攝影機").grid(row=3, column=0, sticky="w", pady=3)
         self.camera_combo = ttk.Combobox(
             top,
             textvariable=self.camera_id,
@@ -188,14 +208,14 @@ class RunApp(tk.Tk):
             width=20
         )
         self.camera_combo.grid(row=3, column=1, sticky="w", padx=6, pady=3)
-        ttk.Button(top, text="Refresh", command=self._refresh_cameras).grid(
+        ttk.Button(top, text="重新掃描", command=self._refresh_cameras).grid(
             row=3,
             column=2,
             sticky="ew",
             pady=3
         )
 
-        ttk.Label(top, text="Save mode").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(top, text="儲存模式").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Combobox(
             top,
             textvariable=self.save_mode,
@@ -206,29 +226,64 @@ class RunApp(tk.Tk):
 
         controls = ttk.Frame(top)
         controls.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        ttk.Button(controls, text="Start Realtime", command=self.start_realtime).pack(
+        ttk.Button(controls, text="開始即時", command=self.start_realtime).pack(
             side="left",
             padx=(0, 6)
         )
-        ttk.Button(controls, text="Stop", command=self.stop_current).pack(
+        ttk.Button(controls, text="停止", command=self.stop_current).pack(
             side="left",
             padx=6
         )
         ttk.Button(
             controls,
-            text="Capture Background",
+            text="拍攝背景",
             command=self.capture_background
+        ).pack(side="left", padx=6)
+
+        ttk.Button(
+            controls,
+            text="播放/暫停",
+            command=self.toggle_playback
+        ).pack(side="left", padx=6)
+
+        ttk.Label(controls, text="倍速").pack(side="left", padx=(12, 4))
+        ttk.Combobox(
+            controls,
+            textvariable=self.playback_speed,
+            state="readonly",
+            values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
+            width=6
+        ).pack(side="left", padx=4)
+
+        ttk.Label(controls, text="大視窗").pack(side="left", padx=(12, 4))
+        ttk.Combobox(
+            controls,
+            textvariable=self.large_view,
+            state="readonly",
+            values=(
+                "view1_box_only",
+                "view2_skeleton",
+                "view3_mask_overlay",
+                "view4_mask",
+                "view5_original"
+            ),
+            width=20
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            controls,
+            text="開啟大視窗",
+            command=self.open_large_view
         ).pack(side="left", padx=6)
 
         images = ttk.Frame(self.realtime_tab)
         images.pack(fill="both", expand=True, pady=(8, 0))
 
         self.panels = {
-            "view1_box_only": ImagePanel(images, "1. Boxes Only"),
-            "view2_skeleton": ImagePanel(images, "2. Boxes + Skeleton"),
-            "view3_mask_overlay": ImagePanel(images, "3. Mask Overlay"),
-            "view4_mask": ImagePanel(images, "4. Pure Mask"),
-            "view5_original": ImagePanel(images, "5. Original"),
+            "view1_box_only": ImagePanel(images, "1. 只顯示框線"),
+            "view2_skeleton": ImagePanel(images, "2. 框線 + 骨架"),
+            "view3_mask_overlay": ImagePanel(images, "3. 遮罩疊圖"),
+            "view4_mask": ImagePanel(images, "4. 純遮罩"),
+            "view5_original": ImagePanel(images, "5. 原始畫面"),
         }
 
         for idx, panel in enumerate(self.panels.values()):
@@ -246,70 +301,74 @@ class RunApp(tk.Tk):
             images.rowconfigure(row, weight=1)
 
     def _build_offline_tab(self):
-        top = ttk.LabelFrame(self.offline_tab, text="Offline Folder Settings", padding=8)
+        top = ttk.LabelFrame(self.offline_tab, text="資料夾模式設定", padding=8)
         top.pack(fill="x")
 
         self._build_path_row(
             top,
             0,
-            "Base folder",
+            "基礎資料夾",
             self.base_dir,
             lambda: self._choose_folder(self.base_dir)
         )
         self._build_path_row(
             top,
             1,
-            "Dataset folder",
+            "影像資料夾",
             self.dataset_dir,
             lambda: self._choose_folder(self.dataset_dir)
         )
         self._build_path_row(
             top,
             2,
-            "ROI model folder",
+            "ROI 模型資料夾",
             self.roi_model_dir,
             lambda: self._choose_folder(self.roi_model_dir)
         )
         self._build_path_row(
             top,
             3,
-            "Output folder",
+            "輸出資料夾",
             self.output_dir,
             lambda: self._choose_folder(self.output_dir)
         )
+        self._build_path_row(
+            top,
+            4,
+            "背景圖路徑",
+            self.background_path,
+            lambda: self._choose_file(self.background_path)
+        )
 
-        ttk.Label(top, text="HyRGB save mode").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(top, text="儲存模式").grid(row=5, column=0, sticky="w", pady=3)
         ttk.Combobox(
             top,
             textvariable=self.offline_save_mode,
             state="readonly",
             values=("none", "event", "all"),
             width=12
-        ).grid(row=4, column=1, sticky="w", padx=6, pady=3)
+        ).grid(row=5, column=1, sticky="w", padx=6, pady=3)
 
         controls = ttk.Frame(top)
-        controls.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        ttk.Button(controls, text="Run Offline Folder", command=self.start_offline).pack(
+        controls.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        ttk.Button(controls, text="開始資料夾分析", command=self.start_offline).pack(
             side="left",
             padx=(0, 6)
         )
-        ttk.Button(controls, text="Stop", command=self.stop_current).pack(
+        ttk.Button(controls, text="停止", command=self.stop_current).pack(
             side="left",
             padx=6
         )
 
         info = ttk.Label(
             self.offline_tab,
-            text=(
-                "Choose a dataset image folder. The app uses its parent as base_dir "
-                "and the folder name as dataset name when possible."
-            ),
+            text="選擇影像資料夾後，程式會逐張分析並把結果即時顯示在五格畫面中。背景圖可獨立指定，不必放在基礎資料夾內。",
             wraplength=900
         )
         info.pack(anchor="w", pady=10)
 
     def _build_params_tab(self):
-        frame = ttk.LabelFrame(self.params_tab, text="HyRGB Parameters", padding=8)
+        frame = ttk.LabelFrame(self.params_tab, text="HyRGB 參數", padding=8)
         frame.pack(fill="x")
 
         params = [
@@ -366,7 +425,7 @@ class RunApp(tk.Tk):
     def _choose_file(self, var):
         path = filedialog.askopenfilename(
             initialdir=os.path.dirname(var.get()) or APP_DIR,
-            filetypes=(("Images", "*.jpg *.jpeg *.png"), ("All files", "*.*"))
+            filetypes=(("影像檔", "*.jpg *.jpeg *.png"), ("所有檔案", "*.*"))
         )
         if path:
             var.set(path)
@@ -375,7 +434,7 @@ class RunApp(tk.Tk):
         try:
             cameras = realtime_run.list_available_cameras()
         except Exception as exc:
-            self._log(f"Camera scan failed: {exc}")
+            self._log(f"攝影機掃描失敗: {exc}")
             cameras = []
 
         values = [str(cam_id) for cam_id in cameras]
@@ -384,7 +443,7 @@ class RunApp(tk.Tk):
         if values and self.camera_id.get() not in values:
             self.camera_id.set(values[0])
 
-        self._log(f"Available cameras: {values}")
+        self._log(f"可用攝影機: {values}")
 
     def _hyrgb_params(self):
         return {
@@ -405,18 +464,63 @@ class RunApp(tk.Tk):
             "foreground_threshold": self.foreground_threshold.get(),
         }
 
+    def _start_monitor(self, name, base_dir):
+        self._stop_monitor()
+        log_dir = os.path.join(base_dir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        save_path = os.path.join(log_dir, f"{name}_performance_log.txt")
+        self.monitor = PerformanceMonitor(save_path=save_path, interval=1.0)
+        self.monitor.start()
+        self._log(f"效能監控已開始: {save_path}")
+
+    def _stop_monitor(self):
+        if self.monitor is not None:
+            self.monitor.stop()
+            self._log(f"效能監控已儲存: {self.monitor.save_path}")
+            self.monitor = None
+
+    def toggle_playback(self):
+        self.playback_paused.set(not self.playback_paused.get())
+        status = "暫停顯示" if self.playback_paused.get() else "繼續播放"
+        self._log(status)
+
+    def open_large_view(self):
+        self.large_view_key = self.large_view.get()
+
+        if self.large_window is not None and self.large_window.winfo_exists():
+            self.large_window.lift()
+            return
+
+        self.large_window = tk.Toplevel(self)
+        self.large_window.title(f"大視窗 - {self.large_view_key}")
+        self.large_window.geometry("980x760")
+        self.large_panel = ImagePanel(
+            self.large_window,
+            self.large_view_key,
+            width=940,
+            height=700
+        )
+        self.large_panel.pack(fill="both", expand=True, padx=10, pady=10)
+
+        if self.last_result is not None:
+            self.large_panel.set_image(
+                self.last_result.get(self.large_view_key)
+            )
+
     def start_realtime(self):
         if self.realtime_thread and self.realtime_thread.is_alive():
-            messagebox.showinfo("Realtime", "Realtime is already running.")
+            messagebox.showinfo("即時模式", "即時模式已經在執行中。")
             return
 
         if not self.camera_id.get():
-            messagebox.showwarning("Camera", "Please select a camera first.")
+            messagebox.showwarning("攝影機", "請先選擇攝影機。")
             return
 
         self.stop_event.clear()
         self.output_buffer.clear()
         self.last_result = None
+        self.playback_paused.set(False)
+        self._start_monitor("run_realtime", self.base_dir.get())
 
         self.realtime_thread = threading.Thread(
             target=self._realtime_worker,
@@ -424,7 +528,7 @@ class RunApp(tk.Tk):
         )
         self.realtime_thread.start()
         self.tabs.select(self.realtime_tab)
-        self._log("Realtime started.")
+        self._log("即時模式已開始。")
 
     def _realtime_worker(self):
         cap = None
@@ -442,7 +546,7 @@ class RunApp(tk.Tk):
             cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
 
             if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera {camera_id}")
+                raise RuntimeError(f"無法開啟攝影機 {camera_id}")
 
             background_path = self.background_path.get()
             realtime_run.ensure_background_image(
@@ -495,7 +599,7 @@ class RunApp(tk.Tk):
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    self._log("Cannot read camera frame.")
+                    self._log("無法讀取攝影機畫面。")
                     break
 
                 frame = realtime_run.prepare_model_frame(
@@ -513,12 +617,13 @@ class RunApp(tk.Tk):
             worker.join(timeout=2.0)
 
         except Exception as exc:
-            self._log(f"Realtime error: {exc}")
+            self._log(f"即時模式錯誤: {exc}")
 
         finally:
             if cap is not None:
                 cap.release()
-            self._log("Realtime stopped.")
+            self._stop_monitor()
+            self._log("即時模式已停止。")
 
     def _poll_results(self):
         try:
@@ -527,21 +632,32 @@ class RunApp(tk.Tk):
         except queue.Empty:
             pass
 
-        display_fps = max(1.0, self.display_fps.get())
+        speed = max(0.1, self.playback_speed.get())
+        display_fps = max(1.0, self.display_fps.get() * speed)
         display_delay = max(0.0, self.display_delay_seconds.get())
         delay_frames = max(1, int(display_fps * display_delay))
         display_interval = 1.0 / display_fps
         now = time.perf_counter()
 
         if now - self.last_display_time >= display_interval:
-            if len(self.output_buffer) > delay_frames:
-                self.last_result = self.output_buffer.popleft()
-            elif self.last_result is None and self.output_buffer:
-                self.last_result = self.output_buffer.popleft()
+            if not self.playback_paused.get():
+                if len(self.output_buffer) > delay_frames:
+                    self.last_result = self.output_buffer.popleft()
+                elif self.last_result is None and self.output_buffer:
+                    self.last_result = self.output_buffer.popleft()
 
             if self.last_result is not None:
                 for key, panel in self.panels.items():
                     panel.set_image(self.last_result.get(key))
+
+                if (
+                    self.large_panel is not None
+                    and self.large_window is not None
+                    and self.large_window.winfo_exists()
+                ):
+                    self.large_panel.set_image(
+                        self.last_result.get(self.large_view_key)
+                    )
 
             self.last_display_time = now
 
@@ -549,17 +665,17 @@ class RunApp(tk.Tk):
 
     def capture_background(self):
         if not self.camera_id.get():
-            messagebox.showwarning("Camera", "Please select a camera first.")
+            messagebox.showwarning("攝影機", "請先選擇攝影機。")
             return
 
         cap = cv2.VideoCapture(int(self.camera_id.get()), cv2.CAP_DSHOW)
         try:
             if not cap.isOpened():
-                raise RuntimeError("Cannot open camera.")
+                raise RuntimeError("無法開啟攝影機。")
 
             ret, frame = cap.read()
             if not ret:
-                raise RuntimeError("Cannot read camera frame.")
+                raise RuntimeError("無法讀取攝影機畫面。")
 
             frame = realtime_run.prepare_model_frame(
                 frame,
@@ -569,33 +685,36 @@ class RunApp(tk.Tk):
             )
             os.makedirs(os.path.dirname(self.background_path.get()), exist_ok=True)
             cv2.imwrite(self.background_path.get(), frame)
-            self._log(f"Background saved: {self.background_path.get()}")
+            self._log(f"背景圖已儲存: {self.background_path.get()}")
 
         except Exception as exc:
-            self._log(f"Capture background failed: {exc}")
-            messagebox.showerror("Background", str(exc))
+            self._log(f"拍攝背景失敗: {exc}")
+            messagebox.showerror("背景圖", str(exc))
 
         finally:
             cap.release()
 
     def start_offline(self):
         if self.offline_thread and self.offline_thread.is_alive():
-            messagebox.showinfo("Offline", "Offline job is already running.")
+            messagebox.showinfo("資料夾模式", "資料夾分析已經在執行中。")
             return
 
         dataset_folder = self.dataset_dir.get()
         if not dataset_folder:
-            messagebox.showwarning("Offline", "Please choose a dataset folder.")
+            messagebox.showwarning("資料夾模式", "請先選擇影像資料夾。")
             return
 
         self.stop_event.clear()
+        self.output_buffer.clear()
+        self.last_result = None
+        self.playback_paused.set(False)
         self.offline_thread = threading.Thread(
             target=self._offline_worker,
             daemon=True
         )
         self.offline_thread.start()
         self.tabs.select(self.realtime_tab)
-        self._log("Offline job started.")
+        self._log("資料夾分析已開始。")
 
     def _offline_worker(self):
         try:
@@ -608,6 +727,7 @@ class RunApp(tk.Tk):
                 output_dir = os.path.join(base_dir, output_dir)
 
             self.base_dir.set(base_dir)
+            self._start_monitor("run_offline", base_dir)
 
             self.output_buffer.clear()
             self.last_result = None
@@ -617,6 +737,7 @@ class RunApp(tk.Tk):
                 data_dir=dataset_name,
                 roi_model_dir=self.roi_model_dir.get(),
                 output_dir=output_dir,
+                background_path=self.background_path.get(),
                 save_mode=self.offline_save_mode.get(),
                 hyrgb_params=self._hyrgb_params(),
                 result_callback=lambda result: realtime_run.put_latest(
@@ -625,14 +746,17 @@ class RunApp(tk.Tk):
                 ),
                 stop_event=self.stop_event
             )
-            self._log("Offline job finished.")
+            self._log("資料夾分析完成。")
 
         except Exception as exc:
-            self._log(f"Offline error: {exc}")
+            self._log(f"資料夾模式錯誤: {exc}")
+
+        finally:
+            self._stop_monitor()
 
     def stop_current(self):
         self.stop_event.set()
-        self._log("Stop requested.")
+        self._log("已要求停止。")
 
     def _log(self, message):
         if hasattr(self, "logger"):
