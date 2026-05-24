@@ -7,7 +7,7 @@ import re
 from collections import deque
 from ultralytics import YOLO
 
-from behavior_analyzer import BehaviorAnalyzer
+from behavior_analyzer1 import BehaviorAnalyzer
 
 
 def postprocess_mask_for_object(mask, kernel_size=3, min_area=20, border_ignore=10):
@@ -146,7 +146,8 @@ def main(
     base_dir,
     input_dir,
     mask_dir,
-    output_dir
+    output_dir,
+    save_mode="event"
 ):
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -198,11 +199,19 @@ def main(
     object_missing_count = 0
     object_alive_frames_dict = {}
 
-    image_paths = sorted(
-        glob.glob(
-            os.path.join(input_dir, "frame_*_aligned.jpg")
+    image_paths = []
+
+    extensions = ["*.jpg", "*.png", "*.jpeg"]
+
+    for ext in extensions:
+
+        image_paths.extend(
+            glob.glob(
+                os.path.join(input_dir, ext)
+            )
         )
-    )
+
+    image_paths = sorted(image_paths)
 
     print(f"找到原圖數量: {len(image_paths)} 張")
     print(f"讀取 mask 資料夾: {mask_dir}")
@@ -262,6 +271,7 @@ def main(
         mask_path = os.path.join(mask_dir, f"{name}_mask.png")
 
         if not os.path.exists(mask_path):
+            print(f"⚠️ 找不到對應 mask: {mask_path}")
             continue
 
         raw_mask = cv2.imread(mask_path, 0)
@@ -702,10 +712,17 @@ def main(
         out_v3.write(bg_remove_render)
         out_v4.write(clean_frame)
 
-        cv2.imwrite(
-            os.path.join(output_dir, f"behavior_{frame_num}.jpg"),
-            annotated_frame
-        )
+        has_event = any(frame_triggers.values())
+        if save_mode == "all":
+            cv2.imwrite(
+                os.path.join(output_dir, f"behavior_{frame_num}.jpg"),
+                annotated_frame
+            )
+        elif save_mode == "event" and has_event:
+            cv2.imwrite(
+                os.path.join(output_dir, f"event_behavior_{frame_num}.jpg"),
+                annotated_frame
+            )
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -1087,3 +1104,14 @@ def analyze_one_frame(frame, mask, behavior_pack):
         "view3_debug": bg_remove_render,
         "view4_clean": clean_frame
     }
+
+
+if __name__ == "__main__":
+
+    main(
+        base_dir="D:/subgarbage",
+        input_dir="input",
+        mask_dir="maskpicture",
+        output_dir="11111/combined_results",
+        save_mode="event"
+    )
