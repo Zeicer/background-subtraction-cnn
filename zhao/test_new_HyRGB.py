@@ -526,7 +526,7 @@ class HybridBGSSystem:
                 f"ratio: {active_ratio:.4f}"
             )
 
-            cv2.imwrite("debug_roi_mask.png", small_mask)
+            # cv2.imwrite("debug_roi_mask.png", small_mask)
 
             # =================================================
             # 核心：
@@ -568,10 +568,10 @@ class HybridBGSSystem:
             ), 0
 
         # ROI 模式才限制 8000
-        if len(active_indices) > 9000:
+        if len(active_indices) > 8000:
             active_indices = np.random.choice(
                 active_indices,
-                9000,
+                8000,
                 replace=False
             )
 
@@ -685,7 +685,8 @@ global_scene_cache = SceneCache(max_size=10)
 # Main
 # =========================================================
 
-def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = "ghz_mask1/mask"):
+def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = "ghz_mask1/mask",
+            save_mode = "all"):
 
     device = torch.device(
         "cuda"
@@ -696,7 +697,7 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
     print("使用裝置:", device)
 
     update_interval = 1
-    varThreshold = 16
+    varThreshold = 24
     num_classes = 2
     active_ratio_threshold = 0.35
 
@@ -876,8 +877,8 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
             mask_save_dir,
             f"{name}_mask.png"
         )
-
-        mask_img.save(save_path)
+        if save_mode == "all":
+            mask_img.save(save_path)
 
         percentage = (
             active_count / (320 * 240)

@@ -1,10 +1,12 @@
 import os
 import cv2
 import numpy as np
+from datetime import datetime
 from PIL import Image
 
 import test_new_HyRGB
 import finalsecond
+
 
 def list_available_cameras(max_test=10):
     available = []
@@ -21,6 +23,7 @@ def list_available_cameras(max_test=10):
         cap.release()
 
     return available
+
 
 def choose_camera():
     cameras = list_available_cameras()
@@ -62,26 +65,18 @@ def collect_calibration_frames(
         if not ret:
             break
 
-        frame = cv2.resize(
-            frame,
-            (width, height)
-        )
+        frame = cv2.resize(frame, (width, height))
 
         frame_rgb = cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2RGB
         )
 
-        pil_frame = Image.fromarray(
-            frame_rgb
-        ).convert("RGB")
+        pil_frame = Image.fromarray(frame_rgb).convert("RGB")
 
         frames.append(pil_frame)
 
-        cv2.imshow(
-            "Calibration Preview",
-            frame
-        )
+        cv2.imshow("Calibration Preview", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -94,6 +89,7 @@ def collect_calibration_frames(
 
 
 def main():
+
     base_dir = r"C:\Users\Asus\Downloads\videotrain\Q_test\5_23env"
 
     roi_model_dir = (
@@ -105,18 +101,33 @@ def main():
         "background.jpg"
     )
 
-    
     width = 320
     height = 240
-    # camera_id = 0
-    # cap = cv2.VideoCapture(camera_id)
+
+    save_mode = "event"
+    # 可選：
+    # "none"  = 完全不存，只顯示
+    # "event" = 只有事件發生時存圖
+    # "all"   = 每一幀都存圖，不推薦
+
+    event_dir = os.path.join(
+        base_dir,
+        "realtime_event_output"
+    )
+
+    os.makedirs(event_dir, exist_ok=True)
+
     camera_id = choose_camera()
-    cap = cv2.VideoCapture(camera_id,cv2.CAP_DSHOW)
+
+    cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
 
     if not cap.isOpened():
         raise RuntimeError(
-            f"無法開啟鏡頭，請確認 camera_id={camera_id} 是否正確"
+            f"無法開啟鏡頭 camera_id={camera_id}"
         )
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
     calibration_frames = collect_calibration_frames(
         cap,
@@ -137,6 +148,8 @@ def main():
 
     print("即時系統啟動，按 q 離開")
 
+    frame_idx = 0
+
     while True:
         ret, frame = cap.read()
 
@@ -144,10 +157,12 @@ def main():
             print("讀取鏡頭失敗")
             break
 
-        frame = cv2.resize(
-            frame,
-            (width, height)
-        )
+        frame = cv2.resize(frame, (width, height))
+
+        # =====================================================
+        # 1. HyRGB 即時產生 mask
+        # 不存 mask，只存在記憶體
+        # =====================================================
 
         mask_img, active_count = test_new_HyRGB.infer_one_frame(
             hyrgb_system,
@@ -163,11 +178,58 @@ def main():
                 cv2.COLOR_RGB2GRAY
             )
 
-        annotated_frame, obj_mask, bg_remove_render = finalsecond.analyze_one_frame(
-            frame,
-            mask_np,
-            behavior_pack
+        # =====================================================
+        # 2. finalsecond 單幀行為分析
+        # =====================================================
+
+        annotated_frame, obj_mask, bg_remove_render, frame_triggers = (
+            finalsecond.analyze_one_frame(
+                frame,
+                mask_np,
+                behavior_pack
+            )
         )
+
+        has_event = any(frame_triggers.values())
+
+        # =====================================================
+        # 3. 只有事件發生時才存圖
+        # =====================================================
+
+        if save_mode == "all":
+            save_path = os.path.join(
+                event_dir,
+                f"frame_{frame_idx:06d}.jpg"
+            )
+
+            cv2.imwrite(save_path, annotated_frame)
+
+        elif save_mode == "event" and has_event:
+
+            event_names = [
+                name
+                for name, triggered in frame_triggers.items()
+                if triggered
+            ]
+
+            event_text = "_".join(event_names)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            save_path = os.path.join(
+                event_dir,
+                f"event_{event_text}_{timestamp}_frame_{frame_idx:06d}.jpg"
+            )
+
+            cv2.imwrite(save_path, annotated_frame)
+
+            print(f"事件觸發，已存圖: {save_path}")
+
+        # save_mode == "none" 時，不存任何圖
+
+        # =====================================================
+        # 4. 即時顯示
+        # =====================================================
 
         cv2.imshow(
             "1. Realtime Behavior Monitor",
@@ -183,6 +245,8 @@ def main():
             "3. Realtime Foreground Debug",
             bg_remove_render
         )
+
+        frame_idx += 1
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
