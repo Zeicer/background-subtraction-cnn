@@ -215,24 +215,19 @@ def process_realtime_frame(
         behavior_pack
     )
 
-    annotated_frame = result_views["view2_ultimate"]
-    mask_view = result_views["view1_mask"]
-    bg_remove_render = result_views["view3_debug"]
-    clean_frame = result_views["view4_clean"]
-    frame_triggers = result_views["frame_triggers"]
-
     return {
         "frame_idx": frame_idx,
-        "annotated_frame": annotated_frame,
-        "mask_np": mask_view,
-        "bg_remove_render": bg_remove_render,
-        "clean_frame": clean_frame,
-        "frame_triggers": frame_triggers
+        "view1_box_only": result_views["view1_box_only"],
+        "view2_skeleton": result_views["view2_skeleton"],
+        "view3_mask_overlay": result_views["view3_mask_overlay"],
+        "view4_mask": result_views["view4_mask"],
+        "view5_original": result_views["view5_original"],
+        "frame_triggers": result_views["frame_triggers"]
     }
 
 
 def save_event_frame(result, save_mode, event_dir):
-    annotated_frame = result["annotated_frame"]
+    annotated_frame = result["view1_box_only"]
     frame_idx = result["frame_idx"]
     frame_triggers = result["frame_triggers"]
     has_event = any(frame_triggers.values())
@@ -334,7 +329,8 @@ def main():
         "varThreshold_step": 2,
         "active_ratio_spike": 0.20,
         "active_ratio_drop": 0.08,
-        "active_ratio_smooth": 0.4
+        "active_ratio_smooth": 0.4,
+        "foreground_threshold": 0.9
     }
 
     save_mode = "event"
@@ -453,18 +449,28 @@ def main():
 
                 if last_result is not None:
                     cv2.imshow(
-                        "1. Realtime Behavior Monitor",
-                        last_result["annotated_frame"]
+                        "1. Boxes Only",
+                        last_result["view1_box_only"]
                     )
 
                     cv2.imshow(
-                        "2. Realtime Mask",
-                        last_result["mask_np"]
+                        "2. Boxes + Skeleton",
+                        last_result["view2_skeleton"]
                     )
 
                     cv2.imshow(
-                        "3. Realtime Foreground Debug",
-                        last_result["bg_remove_render"]
+                        "3. Boxes + Skeleton + Mask",
+                        last_result["view3_mask_overlay"]
+                    )
+
+                    cv2.imshow(
+                        "4. Pure Mask",
+                        last_result["view4_mask"]
+                    )
+
+                    cv2.imshow(
+                        "5. Original Frame",
+                        last_result["view5_original"]
                     )
 
                 last_display_time = now

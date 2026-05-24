@@ -1113,10 +1113,11 @@ def analyze_one_frame(frame, mask, behavior_pack):
 
     # 回傳即時處理完畢的四視窗影像字典
     return {
-        "view1_mask": display_mask_3ch,
-        "view2_ultimate": annotated_frame,
-        "view3_debug": bg_remove_render,
-        "view4_clean": clean_frame,
+        "view1_box_only": clean_frame.copy(),
+        "view2_skeleton": annotated_frame.copy(),
+        "view3_mask_overlay": bg_remove_render.copy(),
+        "view4_mask": display_mask_3ch.copy(),
+        "view5_original": ori_img.copy(),
         "frame_triggers": frame_triggers
     }
 

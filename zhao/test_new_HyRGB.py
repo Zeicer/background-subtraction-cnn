@@ -15,6 +15,9 @@ import torchvision.transforms.functional as TF
 from torchvision.models import vgg16, VGG16_Weights
 
 
+FOREGROUND_THRESHOLD = 0.9
+
+
 # =========================================================
 # CNN / LeNet
 # =========================================================
@@ -212,7 +215,8 @@ class HybridBGSSystem:
         varThreshold_step=2,
         active_ratio_spike=0.20,
         active_ratio_drop=0.08,
-        active_ratio_smooth=0.4
+        active_ratio_smooth=0.4,
+        foreground_threshold=FOREGROUND_THRESHOLD
     ):
 
         self.cnn_model = cnn_model.to(device).eval()
@@ -235,6 +239,7 @@ class HybridBGSSystem:
         self.active_ratio_drop = active_ratio_drop
         self.active_ratio_smooth = active_ratio_smooth
         self.prev_active_ratio = None
+        self.foreground_threshold = foreground_threshold
 
         self.fgbg = cv2.createBackgroundSubtractorMOG2(
             history=300,
@@ -559,7 +564,7 @@ class HybridBGSSystem:
         preds = []
         batch_size = self.batch_size
 
-        with torch.no_grad():
+        with torch.inference_mode():
 
             for i in range(0, len(patches), batch_size):
 
@@ -570,12 +575,16 @@ class HybridBGSSystem:
 
                 logits = self.full_lenet_model(batch)
 
-                pred = torch.argmax(
+                prob = torch.softmax(
                     logits,
                     dim=1
-                ).cpu().numpy()
+                )[:, 1]
 
-                preds.append(pred)
+                pred = (
+                    prob > self.foreground_threshold
+                ).long()
+
+                preds.append(pred.cpu().numpy())
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -724,7 +733,7 @@ class HybridBGSSystem:
         preds = []
         batch_size = self.batch_size
 
-        with torch.no_grad():
+        with torch.inference_mode():
 
             for i in range(
                 0,
@@ -741,12 +750,16 @@ class HybridBGSSystem:
 
                 logits = self.cnn_model(batch)
 
-                pred = torch.argmax(
+                prob = torch.softmax(
                     logits,
                     dim=1
-                ).cpu().numpy()
+                )[:, 1]
 
-                preds.append(pred)
+                pred = (
+                    prob > self.foreground_threshold
+                ).long()
+
+                preds.append(pred.cpu().numpy())
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -823,7 +836,8 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
             varThreshold_step = 2,
             active_ratio_spike = 0.20,
             active_ratio_drop = 0.08,
-            active_ratio_smooth = 0.4):
+            active_ratio_smooth = 0.4,
+            foreground_threshold = FOREGROUND_THRESHOLD):
 
     device = torch.device(
         "cuda"
@@ -963,7 +977,8 @@ def run_hyrgb(base_dir,data_dir,roi_model_dir,input_picture=None,ghz_mask_dir = 
         varThreshold_step=varThreshold_step,
         active_ratio_spike=active_ratio_spike,
         active_ratio_drop=active_ratio_drop,
-        active_ratio_smooth=active_ratio_smooth
+        active_ratio_smooth=active_ratio_smooth,
+        foreground_threshold=foreground_threshold
     )
 
     # =====================================================
@@ -1147,7 +1162,8 @@ def init_hyrgb_system(
         varThreshold_step=2,
         active_ratio_spike=0.20,
         active_ratio_drop=0.08,
-        active_ratio_smooth=0.4
+        active_ratio_smooth=0.4,
+        foreground_threshold=FOREGROUND_THRESHOLD
 ):
     device = torch.device("cuda"if torch.cuda.is_available() else "cpu")
     print("使用裝置:", device)
@@ -1238,7 +1254,8 @@ def init_hyrgb_system(
         varThreshold_step=varThreshold_step,
         active_ratio_spike=active_ratio_spike,
         active_ratio_drop=active_ratio_drop,
-        active_ratio_smooth=active_ratio_smooth
+        active_ratio_smooth=active_ratio_smooth,
+        foreground_threshold=foreground_threshold
     )
 
     if calibration_frames is not None and len(calibration_frames) > 0:
