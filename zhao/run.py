@@ -74,11 +74,15 @@ class RunApp(tk.Tk):
         self.monitor = None
         self.result_queue = queue.Queue(maxsize=8)
         self.output_buffer = deque(maxlen=8)
+        self.playback_results = []
+        self.playback_index = 0
+        self.offline_processing = False
         self.last_result = None
         self.last_display_time = 0.0
         self.large_window = None
         self.large_panel = None
         self.large_view_key = None
+        self.event_alert = False
 
         self.image_refs = {}
 
@@ -139,6 +143,8 @@ class RunApp(tk.Tk):
         self.playback_paused = tk.BooleanVar(value=False)
         self.playback_speed = tk.DoubleVar(value=1.0)
         self.large_view = tk.StringVar(value="view2_skeleton")
+        self.offline_progress = tk.DoubleVar(value=0.0)
+        self.offline_progress_text = tk.StringVar(value="尚未開始")
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=10)
@@ -146,20 +152,24 @@ class RunApp(tk.Tk):
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill="both", expand=True)
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.realtime_tab = ttk.Frame(self.tabs, padding=8)
         self.offline_tab = ttk.Frame(self.tabs, padding=8)
         self.params_tab = ttk.Frame(self.tabs, padding=8)
+        self.events_tab = ttk.Frame(self.tabs, padding=8)
         self.log_tab = ttk.Frame(self.tabs, padding=8)
 
         self.tabs.add(self.realtime_tab, text="即時模式")
         self.tabs.add(self.offline_tab, text="資料夾模式")
         self.tabs.add(self.params_tab, text="參數設定")
+        self.tabs.add(self.events_tab, text="事件資料夾")
         self.tabs.add(self.log_tab, text="執行紀錄")
 
         self._build_realtime_tab()
         self._build_offline_tab()
         self._build_params_tab()
+        self._build_events_tab()
         self._build_log_tab()
 
     def _build_path_row(self, parent, row, label, var, command):
@@ -275,6 +285,12 @@ class RunApp(tk.Tk):
             command=self.open_large_view
         ).pack(side="left", padx=6)
 
+        ttk.Button(
+            controls,
+            text="從頭播放",
+            command=self.restart_playback
+        ).pack(side="left", padx=6)
+
         images = ttk.Frame(self.realtime_tab)
         images.pack(fill="both", expand=True, pady=(8, 0))
 
@@ -359,6 +375,24 @@ class RunApp(tk.Tk):
             side="left",
             padx=6
         )
+        ttk.Button(controls, text="從頭播放", command=self.restart_playback).pack(
+            side="left",
+            padx=6
+        )
+
+        progress_frame = ttk.Frame(top)
+        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        ttk.Label(progress_frame, text="處理進度").pack(side="left", padx=(0, 8))
+        ttk.Progressbar(
+            progress_frame,
+            variable=self.offline_progress,
+            maximum=100
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            progress_frame,
+            textvariable=self.offline_progress_text,
+            width=18
+        ).pack(side="left", padx=(8, 0))
 
         info = ttk.Label(
             self.offline_tab,
@@ -416,6 +450,64 @@ class RunApp(tk.Tk):
         self.log_text = tk.Text(self.log_tab, height=20, wrap="word")
         self.log_text.pack(fill="both", expand=True)
         self.logger = AppLog(self.log_text)
+
+    def _build_events_tab(self):
+        frame = ttk.LabelFrame(self.events_tab, text="事件與結果資料夾", padding=10)
+        frame.pack(fill="x")
+
+        items = [
+            ("即時事件資料夾", self._realtime_event_dir),
+            ("資料夾分析事件圖", self._offline_event_dir),
+            ("1111 四視窗影片", lambda: os.path.join(self.base_dir.get(), "1111")),
+            (
+                "11111 行為結果",
+                lambda: os.path.join(self.base_dir.get(), "11111", "combined_results")
+            ),
+            (
+                "五種事件影片資料夾",
+                lambda: os.path.join(self.base_dir.get(), "11111", "fivebehavior_videos")
+            ),
+            (
+                "HyRGB maskpicture",
+                lambda: os.path.join(self.base_dir.get(), "maskpicture")
+            ),
+        ]
+
+        for row, (label, path_getter) in enumerate(items):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Button(
+                frame,
+                text="開啟資料夾",
+                command=lambda getter=path_getter: self.open_folder(getter())
+            ).grid(row=row, column=1, sticky="w", padx=8, pady=4)
+
+    def _realtime_event_dir(self):
+        return os.path.join(self.base_dir.get(), "realtime_event_output", "event")
+
+    def _offline_event_dir(self):
+        output_dir = self.output_dir.get()
+
+        if not os.path.isabs(output_dir):
+            output_dir = os.path.join(self.base_dir.get(), output_dir)
+
+        return os.path.join(output_dir, "event")
+
+    def open_folder(self, path):
+        os.makedirs(path, exist_ok=True)
+        os.startfile(path)
+
+    def _set_event_alert(self):
+        if not self.event_alert:
+            self.event_alert = True
+            self.tabs.tab(self.events_tab, text="事件資料夾 ●")
+
+    def _clear_event_alert(self):
+        self.event_alert = False
+        self.tabs.tab(self.events_tab, text="事件資料夾")
+
+    def _on_tab_changed(self, event):
+        if self.tabs.select() == str(self.events_tab):
+            self._clear_event_alert()
 
     def _choose_folder(self, var):
         path = filedialog.askdirectory(initialdir=var.get() or APP_DIR)
@@ -484,6 +576,22 @@ class RunApp(tk.Tk):
         status = "暫停顯示" if self.playback_paused.get() else "繼續播放"
         self._log(status)
 
+    def restart_playback(self):
+        if not self.playback_results:
+            self._log("目前沒有可從頭播放的資料夾結果。")
+            return
+
+        self.playback_index = 0
+        self.playback_paused.set(False)
+        self.last_result = None
+        self._log("已從頭播放資料夾結果。")
+
+    def _start_offline_playback(self, results):
+        self.playback_results = results
+        self.playback_index = 0
+        self.playback_paused.set(False)
+        self.last_result = None
+
     def open_large_view(self):
         self.large_view_key = self.large_view.get()
 
@@ -518,6 +626,11 @@ class RunApp(tk.Tk):
 
         self.stop_event.clear()
         self.output_buffer.clear()
+        self.playback_results = []
+        self.playback_index = 0
+        self.offline_processing = True
+        self.offline_progress.set(0)
+        self.offline_progress_text.set("0%")
         self.last_result = None
         self.playback_paused.set(False)
         self._start_monitor("run_realtime", self.base_dir.get())
@@ -626,11 +739,17 @@ class RunApp(tk.Tk):
             self._log("即時模式已停止。")
 
     def _poll_results(self):
-        try:
-            while True:
-                self.output_buffer.append(self.result_queue.get_nowait())
-        except queue.Empty:
-            pass
+        if not self.playback_results:
+            try:
+                while True:
+                    result = self.result_queue.get_nowait()
+                    self.output_buffer.append(result)
+
+                    if any(result.get("frame_triggers", {}).values()):
+                        self._set_event_alert()
+
+            except queue.Empty:
+                pass
 
         speed = max(0.1, self.playback_speed.get())
         display_fps = max(1.0, self.display_fps.get() * speed)
@@ -641,12 +760,23 @@ class RunApp(tk.Tk):
 
         if now - self.last_display_time >= display_interval:
             if not self.playback_paused.get():
-                if len(self.output_buffer) > delay_frames:
-                    self.last_result = self.output_buffer.popleft()
-                elif self.last_result is None and self.output_buffer:
-                    self.last_result = self.output_buffer.popleft()
+                if self.playback_results:
+                    if self.playback_index < len(self.playback_results):
+                        self.last_result = self.playback_results[self.playback_index]
+                        self.playback_index += 1
+                    elif self.playback_results:
+                        self.last_result = self.playback_results[-1]
+
+                else:
+                    if len(self.output_buffer) > delay_frames:
+                        self.last_result = self.output_buffer.popleft()
+                    elif self.last_result is None and self.output_buffer:
+                        self.last_result = self.output_buffer.popleft()
 
             if self.last_result is not None:
+                if any(self.last_result.get("frame_triggers", {}).values()):
+                    self._set_event_alert()
+
                 for key, panel in self.panels.items():
                     panel.set_image(self.last_result.get(key))
 
@@ -706,6 +836,8 @@ class RunApp(tk.Tk):
 
         self.stop_event.clear()
         self.output_buffer.clear()
+        self.playback_results = []
+        self.playback_index = 0
         self.last_result = None
         self.playback_paused.set(False)
         self.offline_thread = threading.Thread(
@@ -731,6 +863,23 @@ class RunApp(tk.Tk):
 
             self.output_buffer.clear()
             self.last_result = None
+            collected_results = []
+
+            def collect_result(result):
+                collected_results.append(result)
+
+                if any(result.get("frame_triggers", {}).values()):
+                    self.after(0, self._set_event_alert)
+
+            def update_progress(done, total):
+                percent = 0 if total == 0 else (done / total) * 100
+                self.after(
+                    0,
+                    lambda: (
+                        self.offline_progress.set(percent),
+                        self.offline_progress_text.set(f"{done}/{total}")
+                    )
+                )
 
             main_run.run_streaming_dataset(
                 base_dir=base_dir,
@@ -740,23 +889,31 @@ class RunApp(tk.Tk):
                 background_path=self.background_path.get(),
                 save_mode=self.offline_save_mode.get(),
                 hyrgb_params=self._hyrgb_params(),
-                result_callback=lambda result: realtime_run.put_latest(
-                    self.result_queue,
-                    result
-                ),
+                result_callback=collect_result,
+                progress_callback=update_progress,
                 stop_event=self.stop_event
             )
-            self._log("資料夾分析完成。")
+
+            if self.stop_event.is_set():
+                self._log("資料夾分析已停止。")
+
+            else:
+                self.after(0, self.offline_progress.set, 100)
+                self.after(0, self.offline_progress_text.set, "完成")
+                self.after(0, self._start_offline_playback, collected_results)
+                self._log("資料夾分析完成，開始播放結果。")
 
         except Exception as exc:
             self._log(f"資料夾模式錯誤: {exc}")
 
         finally:
+            self.offline_processing = False
             self._stop_monitor()
 
     def stop_current(self):
         self.stop_event.set()
         self._log("已要求停止。")
+        messagebox.showinfo("停止", "已停止。")
 
     def _log(self, message):
         if hasattr(self, "logger"):

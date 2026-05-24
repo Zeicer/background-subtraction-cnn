@@ -75,6 +75,7 @@ def run_streaming_dataset(
     save_mode="all",
     hyrgb_params=None,
     result_callback=None,
+    progress_callback=None,
     stop_event=None
 ):
     if hyrgb_params is None:
@@ -244,6 +245,9 @@ def run_streaming_dataset(
 
             if result_callback is not None:
                 result_callback(result)
+
+            if progress_callback is not None:
+                progress_callback(frame_idx + 1, len(input_picture))
 
             has_event = any(result["frame_triggers"].values())
 
