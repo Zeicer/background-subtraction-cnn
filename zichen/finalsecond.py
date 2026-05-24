@@ -240,7 +240,7 @@ def main(
     global_frame_idx = 0
 
     # 用於 10 像素擴大與內縮的形態學核心 (10 * 2 + 1 = 21)
-    morph_kernel_10px = np.ones((21, 21), np.uint8)
+    morph_kernel_20px = np.ones((41, 41), np.uint8)
 
     for path in image_paths:
         filename = os.path.basename(path)
@@ -275,7 +275,7 @@ def main(
         base_mask = cv2.morphologyEx(base_mask, cv2.MORPH_CLOSE, kernel_3, iterations=2)
 
         # 🛠️ 【步驟一：將原始遮罩白塊向外擴大 10 像素】
-        expanded_mask = cv2.dilate(base_mask, morph_kernel_10px, iterations=1)
+        expanded_mask = cv2.dilate(base_mask, morph_kernel_20px, iterations=1)
 
         # 🛠️ 【步驟二：與原圖疊加做去背，生成「擴大去背彩圖」送入 YOLO】
         expanded_foreground = cv2.bitwise_and(ori_img, ori_img, mask=expanded_mask)
@@ -324,7 +324,7 @@ def main(
         geom_remaining_mask = cv2.bitwise_and(base_mask, cv2.bitwise_not(person_erase_mask))
 
         # 🛠️ 【步驟六：將剩下的幾何白塊向內縮減 10 像素】
-        obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_10px, iterations=1)
+        obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_20px, iterations=1)
 
         # 使用原本的函數進行連通域面積與邊緣過濾
         obj_mask = postprocess_mask_for_object(obj_mask, kernel_size=3, min_area=20, border_ignore=10)
@@ -585,10 +585,10 @@ def analyze_one_frame(frame, mask, behavior_pack):
     base_mask = cv2.morphologyEx(base_mask, cv2.MORPH_CLOSE, kernel_3, iterations=2)
 
     # 用於 10 像素擴大與內縮的形態學核心
-    morph_kernel_10px = np.ones((21, 21), np.uint8)
+    morph_kernel_20px = np.ones((41, 41), np.uint8)
 
     # 🛠️ 【步驟一：白塊遮罩向外擴大 10 像素】
-    expanded_mask = cv2.dilate(base_mask, morph_kernel_10px, iterations=1)
+    expanded_mask = cv2.dilate(base_mask, morph_kernel_20px, iterations=1)
 
     # 🛠️ 【步驟二：與原圖疊加做去背，生成「擴大去背彩圖」送入 YOLO】
     expanded_foreground = cv2.bitwise_and(ori_img, ori_img, mask=expanded_mask)
@@ -637,7 +637,7 @@ def analyze_one_frame(frame, mask, behavior_pack):
     geom_remaining_mask = cv2.bitwise_and(base_mask, cv2.bitwise_not(person_erase_mask))
 
     # 🛠️ 【步驟六：將剩下的白塊向內縮減 10 像素】
-    obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_10px, iterations=1)
+    obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_20px, iterations=1)
     obj_mask = postprocess_mask_for_object(obj_mask, kernel_size=3, min_area=20, border_ignore=10)
 
     frame_triggers = {"running": False, "loiter": False, "faint": False, "collision": False, "litter": False}
