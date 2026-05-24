@@ -311,41 +311,19 @@ def main(
         bg_remove_render = foreground_only.copy()
         clean_frame = ori_img.copy()
 
-        # ✨【核心修改點一】將 YOLO 骨架模型的輸入替換為已去背的「去備援彩圖」 (foreground_only)
+        # 🔄【改回最穩定的寫法】將模型輸入改回原始有背景的「ori_img」，確保 AI 特徵不丟失
         pose_results = pose_model(
-            foreground_only,
+            ori_img,
             verbose=False,
             conf=0.3
         )
 
-# 新的程式碼，手動強制繪製骨架與連線
-        if pose_results[0].keypoints is not None and len(pose_results[0].boxes) > 0:
-            kpts = pose_results[0].keypoints.xy.cpu().numpy()
-            
-            # COCO 格式的骨架連線定義
-            skeleton_connections = [
-                (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13), 
-                (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 0), (0, 2), (0, 1)
-            ]
+        if len(pose_results[0].boxes) > 0:
+            pose_results[0].orig_img = annotated_frame
+            annotated_frame = pose_results[0].plot(boxes=False)
 
-            for person_kpts in kpts:
-                # 1. 畫關鍵點
-                for point in person_kpts:
-                    x, y = int(point[0]), int(point[1])
-                    if x > 0 and y > 0:
-                        cv2.circle(bg_remove_render, (x, y), 3, (0, 255, 0), -1)
-                
-                # 2. 畫連線 (這會直接畫在去背圖 bg_remove_render 上)
-                for conn in skeleton_connections:
-                    pt1_idx, pt2_idx = conn
-                    if pt1_idx < len(person_kpts) and pt2_idx < len(person_kpts):
-                        pt1 = person_kpts[pt1_idx]
-                        pt2 = person_kpts[pt2_idx]
-                        if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
-                            cv2.line(bg_remove_render, 
-                                     (int(pt1[0]), int(pt1[1])), 
-                                     (int(pt2[0]), int(pt2[1])), 
-                                     (255, 255, 0), 2)
+            pose_results[0].orig_img = bg_remove_render
+            bg_remove_render = pose_results[0].plot(boxes=False)
 
         detected_people_boxes = []
         detected_keypoints_list = []
@@ -854,9 +832,9 @@ def analyze_one_frame(frame, mask, behavior_pack):
     bg_remove_render = foreground_only.copy()
     clean_frame = ori_img.copy() 
 
-    # ✨【核心修改點二】Realtime API 偵測分支同步將輸入改為去背後的去備援彩圖 (foreground_only)
+    # 🔄【改回最穩定的寫法】Realtime API 偵測分支同步將輸入改回原始有背景的「ori_img」
     pose_results = pose_model(
-        foreground_only,
+        ori_img,
         verbose=False,
         conf=0.3
     )
