@@ -19,6 +19,22 @@ import test_new_HyRGB
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+EVENT_LABELS = {
+    "running": "奔跑",
+    "loiter": "徘徊",
+    "faint": "跌倒",
+    "collision": "碰撞",
+    "litter": "遺留物"
+}
+
+EVENT_DIR_NAMES = {
+    "running": "RUNNING",
+    "loiter": "LOITERING",
+    "faint": "FAINT",
+    "collision": "COLLISION",
+    "litter": "LITTERING"
+}
+
 
 class AppLog:
     def __init__(self, text_widget):
@@ -43,10 +59,26 @@ class ImagePanel(ttk.Frame):
         self.width = width
         self.height = height
         self.photo = None
+        self.last_frame = None
+        self.fill_window = False
+
+        self.label.bind("<Configure>", self._on_resize)
+
+    def set_fill_window(self, enabled):
+        self.fill_window = enabled
+
+        if self.last_frame is not None:
+            self.set_image(self.last_frame)
+
+    def _on_resize(self, event):
+        if self.fill_window and self.last_frame is not None:
+            self.set_image(self.last_frame)
 
     def set_image(self, frame):
         if frame is None:
             return
+
+        self.last_frame = frame
 
         if len(frame.shape) == 2:
             rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
@@ -54,7 +86,17 @@ class ImagePanel(ttk.Frame):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         image = Image.fromarray(rgb)
-        image.thumbnail((self.width, self.height), Image.LANCZOS)
+
+        if self.fill_window:
+            target_width = max(1, self.label.winfo_width())
+            target_height = max(1, self.label.winfo_height())
+            image = image.resize(
+                (target_width, target_height),
+                Image.LANCZOS
+            )
+        else:
+            image.thumbnail((self.width, self.height), Image.LANCZOS)
+
         self.photo = ImageTk.PhotoImage(image)
         self.label.configure(image=self.photo)
 
@@ -83,6 +125,13 @@ class RunApp(tk.Tk):
         self.large_panel = None
         self.large_view_key = None
         self.event_alert = False
+        self.event_buttons = {}
+        self.event_button_alerts = {}
+        self.event_items = {event: [] for event in EVENT_LABELS}
+        self.event_seen = set()
+        self.event_cover_refs = []
+        self.selected_event = None
+        self.event_cover_frame = None
 
         self.image_refs = {}
 
@@ -143,6 +192,7 @@ class RunApp(tk.Tk):
         self.playback_paused = tk.BooleanVar(value=False)
         self.playback_speed = tk.DoubleVar(value=1.0)
         self.large_view = tk.StringVar(value="view2_skeleton")
+        self.large_view_fill = tk.BooleanVar(value=False)
         self.offline_progress = tk.DoubleVar(value=0.0)
         self.offline_progress_text = tk.StringVar(value="尚未開始")
 
@@ -283,6 +333,13 @@ class RunApp(tk.Tk):
             controls,
             text="開啟大視窗",
             command=self.open_large_view
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            controls,
+            text="填滿視窗",
+            variable=self.large_view_fill,
+            command=self.update_large_view_fill
         ).pack(side="left", padx=6)
 
         ttk.Button(
@@ -509,6 +566,251 @@ class RunApp(tk.Tk):
         if self.tabs.select() == str(self.events_tab):
             self._clear_event_alert()
 
+    def _build_events_tab(self):
+        root = ttk.Frame(self.events_tab)
+        root.pack(fill="both", expand=True)
+
+        top = ttk.LabelFrame(root, text="事件分類", padding=10)
+        top.pack(fill="x")
+
+        for col, (event_key, event_name) in enumerate(EVENT_LABELS.items()):
+            box = ttk.Frame(top)
+            box.grid(row=0, column=col, padx=6, pady=4, sticky="n")
+
+            button = ttk.Button(
+                box,
+                text=event_name,
+                command=lambda key=event_key: self.show_event_covers(key)
+            )
+            button.pack(side="left")
+
+            alert = ttk.Label(box, text="", foreground="red")
+            alert.pack(side="left", padx=(3, 0))
+
+            self.event_buttons[event_key] = button
+            self.event_button_alerts[event_key] = alert
+
+        folders = ttk.LabelFrame(root, text="事件資料夾捷徑", padding=10)
+        folders.pack(fill="x", pady=(8, 0))
+
+        items = [
+            ("即時事件資料夾", self._realtime_event_dir),
+            ("資料夾分析事件圖", self._offline_event_dir),
+            ("1111 四視窗影片", lambda: os.path.join(self.base_dir.get(), "1111")),
+            (
+                "11111 行為結果",
+                lambda: os.path.join(self.base_dir.get(), "11111", "combined_results")
+            ),
+            (
+                "五種事件影片資料夾",
+                lambda: os.path.join(self.base_dir.get(), "11111", "fivebehavior_videos")
+            ),
+            (
+                "HyRGB maskpicture",
+                lambda: os.path.join(self.base_dir.get(), "maskpicture")
+            ),
+        ]
+
+        for row, (label, path_getter) in enumerate(items):
+            ttk.Label(folders, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Button(
+                folders,
+                text="開啟資料夾",
+                command=lambda getter=path_getter: self.open_folder(getter())
+            ).grid(row=row, column=1, sticky="w", padx=8, pady=4)
+
+        covers = ttk.LabelFrame(root, text="事件封面", padding=10)
+        covers.pack(fill="both", expand=True, pady=(8, 0))
+
+        self.event_cover_frame = ttk.Frame(covers)
+        self.event_cover_frame.pack(fill="both", expand=True)
+
+    def _set_event_alert(self):
+        if not self.event_alert:
+            self.event_alert = True
+            self.tabs.tab(self.events_tab, text="事件資料夾 ●")
+
+    def _clear_event_alert(self):
+        self.event_alert = False
+        self.tabs.tab(self.events_tab, text="事件資料夾")
+
+    def _on_tab_changed(self, event):
+        if self.tabs.select() == str(self.events_tab):
+            self._clear_event_alert()
+
+    def _event_folder_for(self, event_key):
+        event_dir = EVENT_DIR_NAMES.get(event_key, event_key.upper())
+        return os.path.join(
+            self.base_dir.get(),
+            "11111",
+            "fivebehavior_videos",
+            event_dir
+        )
+
+    def _latest_event_video(self, event_key):
+        folder = self._event_folder_for(event_key)
+
+        if not os.path.isdir(folder):
+            return None
+
+        videos = [
+            os.path.join(folder, name)
+            for name in os.listdir(folder)
+            if name.lower().endswith((".mp4", ".avi", ".mov", ".mkv"))
+        ]
+
+        if not videos:
+            return None
+
+        return max(videos, key=os.path.getmtime)
+
+    def _create_event_video(self, event_key, result):
+        image = result.get("view2_skeleton")
+
+        if image is None:
+            return None
+
+        folder = self._event_folder_for(event_key)
+        os.makedirs(folder, exist_ok=True)
+
+        frame_idx = result.get("frame_idx", 0)
+        filename = f"gui_event_{frame_idx}_{int(time.time() * 1000)}.mp4"
+        video_path = os.path.join(folder, filename)
+
+        if len(image.shape) == 2:
+            frame = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            frame = image.copy()
+
+        frame = cv2.resize(frame, (320, 240))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(video_path, fourcc, 10.0, (320, 240))
+
+        for _ in range(20):
+            writer.write(frame)
+
+        writer.release()
+
+        return video_path
+
+    def _handle_result_events(self, result):
+        triggers = result.get("frame_triggers", {})
+
+        for event_key, triggered in triggers.items():
+            if not triggered or event_key not in EVENT_LABELS:
+                continue
+
+            event_id = (
+                event_key,
+                result.get("frame_idx"),
+                result.get("image_path")
+            )
+
+            if event_id in self.event_seen:
+                continue
+
+            self.event_seen.add(event_id)
+
+            self._set_event_alert()
+            self.event_button_alerts[event_key].configure(text="●")
+
+            item = {
+                "event_key": event_key,
+                "frame_idx": result.get("frame_idx", len(self.event_items[event_key])),
+                "image": result.get("view2_skeleton"),
+                "is_new": True,
+                "video_path": self._create_event_video(event_key, result),
+                "folder_path": self._event_folder_for(event_key)
+            }
+
+            self.event_items[event_key].append(item)
+
+            if self.selected_event == event_key:
+                self.show_event_covers(event_key)
+
+    def show_event_covers(self, event_key):
+        self.selected_event = event_key
+        self.event_button_alerts[event_key].configure(text="")
+
+        for child in self.event_cover_frame.winfo_children():
+            child.destroy()
+
+        self.event_cover_refs.clear()
+
+        title = ttk.Label(
+            self.event_cover_frame,
+            text=f"{EVENT_LABELS[event_key]}事件封面"
+        )
+        title.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        items = self.event_items.get(event_key, [])
+
+        if not items:
+            ttk.Label(self.event_cover_frame, text="目前沒有事件封面。").grid(
+                row=1,
+                column=0,
+                sticky="w"
+            )
+            return
+
+        for idx, item in enumerate(items):
+            row = 1 + idx // 4
+            col = idx % 4
+
+            card = ttk.Frame(self.event_cover_frame, padding=6)
+            card.grid(row=row, column=col, padx=6, pady=6, sticky="n")
+
+            red_dot = "● " if item["is_new"] else ""
+            ttk.Label(
+                card,
+                text=f"{red_dot}{EVENT_LABELS[event_key]} #{item['frame_idx']}",
+                foreground="red" if item["is_new"] else "black"
+            ).pack(anchor="w")
+
+            image = item["image"]
+
+            if image is not None:
+                if len(image.shape) == 2:
+                    rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+                else:
+                    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+                pil_image = Image.fromarray(rgb)
+                pil_image.thumbnail((180, 120), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(pil_image)
+                self.event_cover_refs.append(photo)
+
+                button = ttk.Button(
+                    card,
+                    image=photo,
+                    command=lambda data=item: self.open_event_item(data)
+                )
+                button.pack()
+
+            ttk.Button(
+                card,
+                text="開啟影片",
+                command=lambda data=item: self.open_event_item(data)
+            ).pack(fill="x", pady=(4, 0))
+
+    def open_event_item(self, item):
+        item["is_new"] = False
+
+        video_path = item.get("video_path")
+        folder_path = item.get("folder_path")
+
+        if video_path is None or not os.path.exists(video_path):
+            video_path = self._latest_event_video(item["event_key"])
+            item["video_path"] = video_path
+
+        if video_path is not None and os.path.exists(video_path):
+            os.startfile(video_path)
+        else:
+            self.open_folder(folder_path)
+
+        if self.selected_event == item["event_key"]:
+            self.show_event_covers(item["event_key"])
+
     def _choose_folder(self, var):
         path = filedialog.askdirectory(initialdir=var.get() or APP_DIR)
         if path:
@@ -596,6 +898,7 @@ class RunApp(tk.Tk):
         self.large_view_key = self.large_view.get()
 
         if self.large_window is not None and self.large_window.winfo_exists():
+            self.update_large_view_fill()
             self.large_window.lift()
             return
 
@@ -608,12 +911,17 @@ class RunApp(tk.Tk):
             width=940,
             height=700
         )
+        self.large_panel.set_fill_window(self.large_view_fill.get())
         self.large_panel.pack(fill="both", expand=True, padx=10, pady=10)
 
         if self.last_result is not None:
             self.large_panel.set_image(
                 self.last_result.get(self.large_view_key)
             )
+
+    def update_large_view_fill(self):
+        if self.large_panel is not None:
+            self.large_panel.set_fill_window(self.large_view_fill.get())
 
     def start_realtime(self):
         if self.realtime_thread and self.realtime_thread.is_alive():
@@ -746,7 +1054,7 @@ class RunApp(tk.Tk):
                     self.output_buffer.append(result)
 
                     if any(result.get("frame_triggers", {}).values()):
-                        self._set_event_alert()
+                        self._handle_result_events(result)
 
             except queue.Empty:
                 pass
@@ -775,7 +1083,7 @@ class RunApp(tk.Tk):
 
             if self.last_result is not None:
                 if any(self.last_result.get("frame_triggers", {}).values()):
-                    self._set_event_alert()
+                    self._handle_result_events(self.last_result)
 
                 for key, panel in self.panels.items():
                     panel.set_image(self.last_result.get(key))
@@ -869,7 +1177,7 @@ class RunApp(tk.Tk):
                 collected_results.append(result)
 
                 if any(result.get("frame_triggers", {}).values()):
-                    self.after(0, self._set_event_alert)
+                    self.after(0, self._handle_result_events, result)
 
             def update_progress(done, total):
                 percent = 0 if total == 0 else (done / total) * 100
