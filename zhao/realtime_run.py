@@ -209,19 +209,24 @@ def process_realtime_frame(
             cv2.COLOR_RGB2GRAY
         )
 
-    annotated_frame, obj_mask, bg_remove_render, frame_triggers = (
-        finalsecond.analyze_one_frame(
-            frame,
-            mask_np,
-            behavior_pack
-        )
+    result_views = finalsecond.analyze_one_frame(
+        frame,
+        mask_np,
+        behavior_pack
     )
+
+    annotated_frame = result_views["view2_ultimate"]
+    mask_view = result_views["view1_mask"]
+    bg_remove_render = result_views["view3_debug"]
+    clean_frame = result_views["view4_clean"]
+    frame_triggers = result_views["frame_triggers"]
 
     return {
         "frame_idx": frame_idx,
         "annotated_frame": annotated_frame,
-        "mask_np": mask_np,
+        "mask_np": mask_view,
         "bg_remove_render": bg_remove_render,
+        "clean_frame": clean_frame,
         "frame_triggers": frame_triggers
     }
 

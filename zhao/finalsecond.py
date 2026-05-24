@@ -446,6 +446,7 @@ def main(
                         (0, 0, 255),
                         2
                     )
+                    frame_triggers["faint"] = True
                 elif is_run:
                     cv2.putText(
                         view,
@@ -456,6 +457,7 @@ def main(
                         (0, 255, 255),
                         1
                     )
+                    frame_triggers["running"] = True
 
                 if is_loiter:
                     cv2.putText(
@@ -467,6 +469,7 @@ def main(
                         (255, 0, 255),
                         1
                     )
+                    frame_triggers["loiter"] = True
 
         pids = list(active_people.keys())
 
@@ -902,7 +905,13 @@ def analyze_one_frame(frame, mask, behavior_pack):
                     detected_keypoints_list.append(all_kpts_data[idx])
                 else:
                     detected_keypoints_list.append(None)
-
+    frame_triggers = {
+        "running": False,
+        "loiter": False,
+        "faint": False,
+        "collision": False,
+        "litter": False
+    }
     active_people = person_tracker.update(detected_people_boxes)
 
     for pid, bbox in active_people.items():
@@ -944,6 +953,7 @@ def analyze_one_frame(frame, mask, behavior_pack):
                     (0, 0, 255),
                     2
                 )
+                frame_triggers["faint"] = True
             elif is_run:
                 cv2.putText(
                     view,
@@ -954,6 +964,7 @@ def analyze_one_frame(frame, mask, behavior_pack):
                     (0, 255, 255),
                     1
                 )
+                frame_triggers["running"] = True
 
             if is_loiter:
                 cv2.putText(
@@ -965,12 +976,14 @@ def analyze_one_frame(frame, mask, behavior_pack):
                     (255, 0, 255),
                     1
                 )
+                frame_triggers["loiter"] = True
 
     pids = list(active_people.keys())
 
     for i in range(len(pids)):
         for j in range(i + 1, len(pids)):
             if analyzer.check_collision(pids[i], pids[j]):
+                frame_triggers["collision"] = True
                 bx1, by1, _, _ = active_people[pids[i]]
                 bx2, by2, _, _ = active_people[pids[j]]
 
@@ -1034,6 +1047,7 @@ def analyze_one_frame(frame, mask, behavior_pack):
             ox, oy, ow, oh = obbox
 
             if is_litter:
+                frame_triggers["litter"] = True
                 assigned_pid = getattr(analyzer, "object_owner_memory", {}).get(oid)
                 if assigned_pid is not None and assigned_pid in active_people:
                     px, py, pw, ph = active_people[assigned_pid]
@@ -1102,7 +1116,8 @@ def analyze_one_frame(frame, mask, behavior_pack):
         "view1_mask": display_mask_3ch,
         "view2_ultimate": annotated_frame,
         "view3_debug": bg_remove_render,
-        "view4_clean": clean_frame
+        "view4_clean": clean_frame,
+        "frame_triggers": frame_triggers
     }
 
 
