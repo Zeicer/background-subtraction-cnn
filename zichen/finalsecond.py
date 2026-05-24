@@ -311,9 +311,25 @@ def main(
         bg_remove_render = foreground_only.copy()
         clean_frame = ori_img.copy()
 
-        # 🔄【改回最穩定的寫法】將模型輸入改回原始有背景的「ori_img」，確保 AI 特徵不丟失
+        # ✅ YOLO 判斷前背景剪除條件：
+        # connectedComponentsWithStats 會把「背景」也算成一個 label，
+        # 因此真正白塊數量 = num_labels - 1。
+        # 白塊數量必須介於 1 到 3，才使用背景剪除後的 foreground_only；
+        # 若白塊為 0 或 >= 4，代表沒有前景或 mask 太破碎，改用原圖 ori_img。
+        num_labels, _, _, _ = cv2.connectedComponentsWithStats(
+            person_bgs_mask,
+            connectivity=8
+        )
+
+        white_block_count = num_labels - 1
+
+        if 0 < white_block_count < 4:
+            detection_input = foreground_only
+        else:
+            detection_input = ori_img
+
         pose_results = pose_model(
-            ori_img,
+            detection_input,
             verbose=False,
             conf=0.3
         )
@@ -832,9 +848,25 @@ def analyze_one_frame(frame, mask, behavior_pack):
     bg_remove_render = foreground_only.copy()
     clean_frame = ori_img.copy() 
 
-    # 🔄【改回最穩定的寫法】Realtime API 偵測分支同步將輸入改回原始有背景的「ori_img」
+    # ✅ YOLO 判斷前背景剪除條件：
+    # connectedComponentsWithStats 會把「背景」也算成一個 label，
+    # 因此真正白塊數量 = num_labels - 1。
+    # 白塊數量必須介於 1 到 3，才使用背景剪除後的 foreground_only；
+    # 若白塊為 0 或 >= 4，代表沒有前景或 mask 太破碎，改用原圖 ori_img。
+    num_labels, _, _, _ = cv2.connectedComponentsWithStats(
+        person_bgs_mask,
+        connectivity=8
+    )
+
+    white_block_count = num_labels - 1
+
+    if 0 < white_block_count < 4:
+        detection_input = foreground_only
+    else:
+        detection_input = ori_img
+
     pose_results = pose_model(
-        ori_img,
+        detection_input,
         verbose=False,
         conf=0.3
     )
