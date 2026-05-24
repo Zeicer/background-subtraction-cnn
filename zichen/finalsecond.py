@@ -199,15 +199,10 @@ def main(
     object_alive_frames_dict = {}
 
     image_paths = []
-
     extensions = ["*.jpg", "*.png", "*.jpeg"]
 
     for ext in extensions:
-        image_paths.extend(
-            glob.glob(
-                os.path.join(input_dir, ext)
-            )
-        )
+        image_paths.extend(glob.glob(os.path.join(input_dir, ext)))
 
     image_paths = sorted(image_paths)
 
@@ -240,18 +235,12 @@ def main(
 
     frame_buffer = deque(maxlen=100)
     video_tasks = []
-    behavior_cooldown = {
-        k: -999
-        for k in behavior_dirs.keys()
-    }
-
-    # COCO 格式的官方骨架連線索引對應定義
-    skeleton_connections = [
-        (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13), 
-        (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 0), (0, 2), (0, 1)
-    ]
+    behavior_cooldown = {k: -999 for k in behavior_dirs.keys()}
 
     global_frame_idx = 0
+
+    # 用於 10 像素擴大與內縮的形態學核心 (10 * 2 + 1 = 21)
+    morph_kernel_10px = np.ones((21, 21), np.uint8)
 
     for path in image_paths:
         filename = os.path.basename(path)
@@ -278,291 +267,131 @@ def main(
         if raw_mask is None:
             continue
 
-        raw_mask = cv2.resize(
-            raw_mask,
-            (320, 240),
-            interpolation=cv2.INTER_NEAREST
-        )
+        raw_mask = cv2.resize(raw_mask, (320, 240), interpolation=cv2.INTER_NEAREST)
 
-        obj_mask = postprocess_mask_for_object(
-            raw_mask,
-            kernel_size=3,
-            min_area=20,
-            border_ignore=10
-        )
+        # 基礎形態學優化（取得原始的人體 + 幾何物件白塊）
+        kernel_3 = np.ones((3, 3), np.uint8)
+        base_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, kernel_3, iterations=1)
+        base_mask = cv2.morphologyEx(base_mask, cv2.MORPH_CLOSE, kernel_3, iterations=2)
 
-        kernel = np.ones((3, 3), np.uint8)
+        # 🛠️ 【步驟一：將原始遮罩白塊向外擴大 10 像素】
+        expanded_mask = cv2.dilate(base_mask, morph_kernel_10px, iterations=1)
 
-        person_bgs_mask = cv2.morphologyEx(
-            raw_mask,
-            cv2.MORPH_OPEN,
-            kernel,
-            iterations=1
-        )
-
-        person_bgs_mask = cv2.morphologyEx(
-            person_bgs_mask,
-            cv2.MORPH_CLOSE,
-            kernel,
-            iterations=2
-        )
-
-        foreground_only = cv2.bitwise_and(
-            ori_img,
-            ori_img,
-            mask=person_bgs_mask
-        )
+        # 🛠️ 【步驟二：與原圖疊加做去背，生成「擴大去背彩圖」送入 YOLO】
+        expanded_foreground = cv2.bitwise_and(ori_img, ori_img, mask=expanded_mask)
 
         annotated_frame = ori_img.copy() 
-        bg_remove_render = foreground_only.copy()
+        bg_remove_render = expanded_foreground.copy()
         clean_frame = ori_img.copy()
 
-        # ✨【核心修改點一：主程式自適應流向判定】
-        # 計算人體遮罩白塊的連通元件數量，用以評估是否過於破碎
-        num_labels, _, _, _ = cv2.connectedComponentsWithStats(person_bgs_mask, connectivity=8)
-        
-        # 閾值設定為 6 (即除去背景底色外，若有超過 5 個分散的小碎白塊，視為破碎)
-        if num_labels > 6:
-            detection_input = ori_img       # 遮罩品質不佳，改以原圖判斷
-        else:
-            detection_input = foreground_only  # 遮罩品質良好，維持去背圖判斷
+        # 🛠️ 【步驟三：將擴大去背圖丟給 YOLO 進行偵測】
+        pose_results = pose_model(expanded_foreground, verbose=False, conf=0.3)
 
-        pose_results = pose_model(
-            detection_input,
-            verbose=False,
-            conf=0.3
-        )
+        if len(pose_results[0].boxes) > 0:
+            pose_results[0].orig_img = annotated_frame
+            annotated_frame = pose_results[0].plot(boxes=False)
 
-        # ✨【核心修改點二：手動強制繪製骨架與連線】
-        if pose_results[0].keypoints is not None and len(pose_results[0].boxes) > 0:
-            kpts = pose_results[0].keypoints.xy.cpu().numpy()
-
-            for person_kpts in kpts:
-                # 1. 繪製關鍵點點位（綠色圓點）
-                for point in person_kpts:
-                    kx, ky = int(point[0]), int(point[1])
-                    if kx > 0 and ky > 0:
-                        cv2.circle(bg_remove_render, (kx, ky), 3, (0, 255, 0), -1)
-                        cv2.circle(annotated_frame, (kx, ky), 3, (0, 255, 0), -1)
-                
-                # 2. 依據 COCO 定義強制連線（青黃色線條）
-                for conn in skeleton_connections:
-                    pt1_idx, pt2_idx = conn
-                    if pt1_idx < len(person_kpts) and pt2_idx < len(person_kpts):
-                        pt1 = person_kpts[pt1_idx]
-                        pt2 = person_kpts[pt2_idx]
-                        if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
-                            p1_coord = (int(pt1[0]), int(pt1[1]))
-                            p2_coord = (int(pt2[0]), int(pt2[1]))
-                            # 同步畫在去背圖與標註圖上
-                            cv2.line(bg_remove_render, p1_coord, p2_coord, (255, 255, 0), 2)
-                            cv2.line(annotated_frame, p1_coord, p2_coord, (255, 255, 0), 2)
+            pose_results[0].orig_img = bg_remove_render
+            bg_remove_render = pose_results[0].plot(boxes=False)
 
         detected_people_boxes = []
         detected_keypoints_list = []
+        
+        # 建立一個擦除畫布，用來記錄需要剪除的人體 YOLO 區塊
+        person_erase_mask = np.zeros_like(base_mask)
 
         if len(pose_results[0].boxes) > 0:
             all_boxes = pose_results[0].boxes
-
-            if pose_results[0].keypoints is not None:
-                all_kpts_data = (
-                    pose_results[0]
-                    .keypoints
-                    .xy
-                    .cpu()
-                    .numpy()
-                )
-            else:
-                all_kpts_data = None
+            all_kpts_data = pose_results[0].keypoints.xy.cpu().numpy() if pose_results[0].keypoints is not None else None
 
             for idx, box in enumerate(all_boxes):
                 if int(box.cls[0]) == 0:
-                    px1, py1, px2, py2 = map(
-                        int,
-                        box.xyxy[0]
-                    )
+                    px1, py1, px2, py2 = map(int, box.xyxy[0])
+                    px1, py1 = max(0, px1), max(0, py1)
+                    px2, py2 = min(ori_img.shape[1], px2), min(ori_img.shape[0], py2)
 
-                    detected_people_boxes.append(
-                        (
-                            px1,
-                            py1,
-                            px2 - px1,
-                            py2 - py1
-                        )
-                    )
+                    detected_people_boxes.append((px1, py1, px2 - px1, py2 - py1))
 
-                    if (
-                        all_kpts_data is not None
-                        and idx < len(all_kpts_data)
-                    ):
-                        detected_keypoints_list.append(
-                            all_kpts_data[idx]
-                        )
+                    # 🛠️ 【步驟四：在擦除遮罩上，將 YOLO 人體範圍塗成實心白塊】
+                    cv2.rectangle(person_erase_mask, (px1, py1), (px2, py2), 255, -1)
+
+                    if all_kpts_data is not None and idx < len(all_kpts_data):
+                        detected_keypoints_list.append(all_kpts_data[idx])
                     else:
                         detected_keypoints_list.append(None)
 
-        frame_triggers = {
-            k: False
-            for k in behavior_dirs.keys()
-        }
+        # 🛠️ 【步驟五：從原始遮罩中剪除（扣除）人體區域】
+        geom_remaining_mask = cv2.bitwise_and(base_mask, cv2.bitwise_not(person_erase_mask))
 
-        active_people = person_tracker.update(
-            detected_people_boxes
-        )
+        # 🛠️ 【步驟六：將剩下的幾何白塊向內縮減 10 像素】
+        obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_10px, iterations=1)
+
+        # 使用原本的函數進行連通域面積與邊緣過濾
+        obj_mask = postprocess_mask_for_object(obj_mask, kernel_size=3, min_area=20, border_ignore=10)
+
+        frame_triggers = {k: False for k in behavior_dirs.keys()}
+        active_people = person_tracker.update(detected_people_boxes)
 
         for pid, bbox in active_people.items():
             px, py, pw, ph = bbox
-
             matched_kpts = None
             best_iou = 0.5
 
             for idx, d_box in enumerate(detected_people_boxes):
-                iou = calculate_iou(
-                    bbox,
-                    d_box
-                )
-
+                iou = calculate_iou(bbox, d_box)
                 if iou > best_iou:
                     best_iou = iou
                     matched_kpts = detected_keypoints_list[idx]
 
-            analyzer.update_person(
-                pid,
-                bbox,
-                keypoints=matched_kpts
-            )
-
+            analyzer.update_person(pid, bbox, keypoints=matched_kpts)
             is_run, speed = analyzer.check_running(pid)
             is_loiter = analyzer.check_loitering(pid)
             is_fall = analyzer.check_fall(pid)
 
             for view in [annotated_frame, bg_remove_render, clean_frame]:
-                cv2.rectangle(
-                    view,
-                    (px, py),
-                    (px + pw, py + ph),
-                    (255, 255, 255),
-                    2
-                )
-
-                cv2.putText(
-                    view,
-                    f"ID:{pid}",
-                    (px, max(py - 8, 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1
-                )
+                cv2.rectangle(view, (px, py), (px + pw, py + ph), (255, 255, 255), 2)
+                cv2.putText(view, f"ID:{pid}", (px, max(py - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             if is_fall:
                 frame_triggers["faint"] = True
             elif is_run:
                 frame_triggers["running"] = True
-
             if is_loiter:
                 frame_triggers["loiter"] = True
 
             for view in [annotated_frame, bg_remove_render, clean_frame]:
                 if is_fall:
-                    cv2.putText(
-                        view,
-                        " ALERT: FAINT!",
-                        (px - 10, py + ph + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45,
-                        (0, 0, 255),
-                        2
-                    )
-                    frame_triggers["faint"] = True
+                    cv2.putText(view, " ALERT: FAINT!", (px - 10, py + ph + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
                 elif is_run:
-                    cv2.putText(
-                        view,
-                        f"RUNNING ({int(speed)}%)",
-                        (px, py - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (0, 255, 255),
-                        1
-                    )
-                    frame_triggers["running"] = True
-
+                    cv2.putText(view, f"RUNNING ({int(speed)}%)", (px, py - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                 if is_loiter:
-                    cv2.putText(
-                        view,
-                        "LOITERING",
-                        (px + pw - 65, py - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 0, 255),
-                        1
-                    )
-                    frame_triggers["loiter"] = True
+                    cv2.putText(view, "LOITERING", (px + pw - 65, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
         pids = list(active_people.keys())
-
         for i in range(len(pids)):
             for j in range(i + 1, len(pids)):
-                if analyzer.check_collision(
-                    pids[i],
-                    pids[j]
-                ):
+                if analyzer.check_collision(pids[i], pids[j]):
                     frame_triggers["collision"] = True
-
                     bx1, by1, _, _ = active_people[pids[i]]
                     bx2, by2, _, _ = active_people[pids[j]]
 
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
-                        cv2.putText(
-                            view,
-                            " COLLISION!",
-                            ((bx1 + bx2) // 2, (by1 + by2) // 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 75, 255),
-                            2
-                        )
+                        cv2.putText(view, " COLLISION!", ((bx1 + bx2) // 2, (by1 + by2) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 75, 255), 2)
 
-        num_o, labels_o, stats_o, _ = cv2.connectedComponentsWithStats(
-            obj_mask,
-            connectivity=8
-        )
-
+        num_o, labels_o, stats_o, _ = cv2.connectedComponentsWithStats(obj_mask, connectivity=8)
         current_frame_object_boxes = []
 
         for i in range(1, num_o):
-            x = stats_o[i, 0]
-            y = stats_o[i, 1]
-            w = stats_o[i, 2]
-            h = stats_o[i, 3]
-            area = stats_o[i, 4]
+            x, y, w, h, area = stats_o[i, 0], stats_o[i, 1], stats_o[i, 2], stats_o[i, 3], stats_o[i, 4]
 
             if area < 15 or area > 450:
                 continue
             if w < 3 or h < 3:
                 continue
-
-            if (
-                x <= 15
-                or y <= 15
-                or x + w >= 305
-                or y + h >= 225
-            ) and (
-                h >= 50
-                or (h / max(w, 1)) >= 1.4
-                or w <= 8
-                or h <= 8
-            ):
+            if (x <= 15 or y <= 15 or x + w >= 305 or y + h >= 225) and (h >= 50 or (h / max(w, 1)) >= 1.4 or w <= 8 or h <= 8):
                 continue
 
-            if not any(
-                box_inside_or_overlap(
-                    (x, y, w, h),
-                    b,
-                    0.8
-                )
-                for b in detected_people_boxes
-            ):
+            if not any(box_inside_or_overlap((x, y, w, h), b, 0.8) for b in detected_people_boxes):
                 current_frame_object_boxes.append((x, y, w, h))
 
         if len(current_frame_object_boxes) > 0:
@@ -585,32 +414,24 @@ def main(
 
                     if assigned_pid is not None and assigned_pid in active_people:
                         px, py, pw, ph = active_people[assigned_pid]
-
                         for view in [annotated_frame, bg_remove_render, clean_frame]:
                             cv2.rectangle(view, (px, py), (px + pw, py + ph), (0, 0, 255), 3)
-                            cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", 
-                                        (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+                            cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
 
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
                         cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 0, 255), 2)
-                        cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                        cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
                 else:
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
                         cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 255, 255), 1)
-                        cv2.putText(view, f"obj:{oid}", (ox, max(oy - 5, 15)), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
-
+                        cv2.putText(view, f"obj:{oid}", (ox, max(oy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
         else:
             object_missing_count += 1
             valid_compensation_boxes = []
 
             for oid, alive_count in list(object_alive_frames_dict.items()):
                 if alive_count >= 5:
-                    allowed_comp = min(
-                        int(BASE_COMPENSATION + (alive_count * TRUST_ACCUMULATION_RATE)),
-                        MAX_COMPENSATION
-                    )
+                    allowed_comp = min(int(BASE_COMPENSATION + (alive_count * TRUST_ACCUMULATION_RATE)), MAX_COMPENSATION)
 
                     if object_missing_count <= allowed_comp:
                         if oid in object_tracker.tracked_objects:
@@ -626,24 +447,14 @@ def main(
                     lox, loy, low, loh = box
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
                         cv2.rectangle(view, (lox, loy), (lox + low, loy + loh), (0, 165, 255), 1, cv2.LINE_AA)
-                        cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", 
-                                    (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
+                        cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
             else:
                 last_object_boxes = []
                 object_alive_frames_dict.clear()
 
-        analyzer.clear_dead_tracks(
-            list(active_people.keys()),
-            list(object_tracker.tracked_objects.keys())
-        )
+        analyzer.clear_dead_tracks(list(active_people.keys()), list(object_tracker.tracked_objects.keys()))
 
-        frame_buffer.append(
-            (
-                global_frame_idx,
-                frame_num,
-                annotated_frame.copy()
-            )
-        )
+        frame_buffer.append((global_frame_idx, frame_num, annotated_frame.copy()))
 
         for b_name, triggered in frame_triggers.items():
             if triggered:
@@ -651,72 +462,33 @@ def main(
                     continue
 
                 behavior_cooldown[b_name] = global_frame_idx
-
-                print(
-                    f"🎬 [事件觸發] 行為: {b_name.upper()} | "
-                    f"觸發點 Frame: {frame_num}"
-                )
+                print(f"🎬 [事件觸發] 行為: {b_name.upper()} | 觸發點 Frame: {frame_num}")
 
                 start_idx = max(0, global_frame_idx - 60)
                 end_idx = global_frame_idx + 30
-
-                video_tasks.append(
-                    {
-                        "behavior": b_name,
-                        "trigger_frame": frame_num,
-                        "start_global_idx": start_idx,
-                        "end_global_idx": end_idx,
-                        "saved": False
-                    }
-                )
+                video_tasks.append({"behavior": b_name, "trigger_frame": frame_num, "start_global_idx": start_idx, "end_global_idx": end_idx, "saved": False})
 
         for task in video_tasks:
-            if (
-                not task["saved"]
-                and global_frame_idx >= task["end_global_idx"]
-            ):
-                extracted_frames = [
-                    f
-                    for idx, f_num, f in frame_buffer
-                    if task["start_global_idx"] <= idx <= task["end_global_idx"]
-                ]
+            if not task["saved"] and global_frame_idx >= task["end_global_idx"]:
+                extracted_frames = [f for idx, f_num, f in frame_buffer if task["start_global_idx"] <= idx <= task["end_global_idx"]]
 
                 if len(extracted_frames) > 0:
                     b_name = task["behavior"]
                     t_frame = task["trigger_frame"]
+                    video_filename = os.path.join(behavior_dirs[b_name], f"event_trigger_{t_frame}.mp4")
 
-                    video_filename = os.path.join(
-                        behavior_dirs[b_name],
-                        f"event_trigger_{t_frame}.mp4"
-                    )
-
-                    out_video = cv2.VideoWriter(
-                        video_filename,
-                        fourcc,
-                        20.0,
-                        (320, 240)
-                    )
-
+                    out_video = cv2.VideoWriter(video_filename, fourcc, 20.0, (320, 240))
                     for f in extracted_frames:
                         out_video.write(f)
-
                     out_video.release()
 
-                    print(
-                        f"💾 [影片分類成功] {b_name.upper()} "
-                        f"影片已存入: {video_filename}"
-                    )
-
+                    print(f"💾 [影片分類成功] {b_name.upper()} 影片已存入: {video_filename}")
                     task["saved"] = True
 
         video_tasks = [t for t in video_tasks if not t["saved"]]
         global_frame_idx += 1
 
-        display_mask = (
-            obj_mask
-            if obj_mask.max() == 255
-            else obj_mask * 255
-        )
+        display_mask = obj_mask if obj_mask.max() == 255 else obj_mask * 255
         display_mask_3ch = cv2.cvtColor(display_mask, cv2.COLOR_GRAY2BGR)
 
         cv2.imshow("1. Geometry Object Mask View (B&W)", display_mask)
@@ -731,46 +503,25 @@ def main(
 
         has_event = any(frame_triggers.values())
         if save_mode == "all":
-            cv2.imwrite(
-                os.path.join(output_dir, f"behavior_{frame_num}.jpg"),
-                annotated_frame
-            )
+            cv2.imwrite(os.path.join(output_dir, f"behavior_{frame_num}.jpg"), annotated_frame)
         elif save_mode == "event" and has_event:
-            cv2.imwrite(
-                os.path.join(output_dir, f"event_behavior_{frame_num}.jpg"),
-                annotated_frame
-            )
+            cv2.imwrite(os.path.join(output_dir, f"event_behavior_{frame_num}.jpg"), annotated_frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     for task in video_tasks:
         if not task["saved"]:
-            extracted_frames = [
-                f
-                for idx, f_num, f in frame_buffer
-                if task["start_global_idx"] <= idx
-            ]
+            extracted_frames = [f for idx, f_num, f in frame_buffer if task["start_global_idx"] <= idx]
 
             if len(extracted_frames) > 0:
                 b_name = task["behavior"]
                 t_frame = task["trigger_frame"]
+                video_filename = os.path.join(behavior_dirs[b_name], f"event_trigger_{t_frame}_end.mp4")
 
-                video_filename = os.path.join(
-                    behavior_dirs[b_name],
-                    f"event_trigger_{t_frame}_end.mp4"
-                )
-
-                out_video = cv2.VideoWriter(
-                    video_filename,
-                    fourcc,
-                    20.0,
-                    (320, 240)
-                )
-
+                out_video = cv2.VideoWriter(video_filename, fourcc, 20.0, (320, 240))
                 for f in extracted_frames:
                     out_video.write(f)
-
                 out_video.release()
 
     out_v1.release()
@@ -783,7 +534,7 @@ def main(
 
 
 # =========================================================
-# Realtime API - 初始化與逐幀分析
+# Realtime API - 初始化與逐幀分析 (同步重構新邏輯)
 # =========================================================
 def init_behavior_system():
     pose_model = YOLO("yolo11n-pose.pt")
@@ -826,131 +577,70 @@ def analyze_one_frame(frame, mask, behavior_pack):
     else:
         raw_mask = mask.copy()
 
-    raw_mask = cv2.resize(
-        raw_mask,
-        (320, 240),
-        interpolation=cv2.INTER_NEAREST
-    )
+    raw_mask = cv2.resize(raw_mask, (320, 240), interpolation=cv2.INTER_NEAREST)
 
-    obj_mask = postprocess_mask_for_object(
-        raw_mask,
-        kernel_size=3,
-        min_area=20,
-        border_ignore=10
-    )
+    # 基礎形態學優化
+    kernel_3 = np.ones((3, 3), np.uint8)
+    base_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, kernel_3, iterations=1)
+    base_mask = cv2.morphologyEx(base_mask, cv2.MORPH_CLOSE, kernel_3, iterations=2)
 
-    kernel = np.ones((3, 3), np.uint8)
+    # 用於 10 像素擴大與內縮的形態學核心
+    morph_kernel_10px = np.ones((21, 21), np.uint8)
 
-    person_bgs_mask = cv2.morphologyEx(
-        raw_mask,
-        cv2.MORPH_OPEN,
-        kernel,
-        iterations=1
-    )
+    # 🛠️ 【步驟一：白塊遮罩向外擴大 10 像素】
+    expanded_mask = cv2.dilate(base_mask, morph_kernel_10px, iterations=1)
 
-    person_bgs_mask = cv2.morphologyEx(
-        person_bgs_mask,
-        cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
-    )
-
-    foreground_only = cv2.bitwise_and(
-        ori_img,
-        ori_img,
-        mask=person_bgs_mask
-    )
+    # 🛠️ 【步驟二：與原圖疊加做去背，生成「擴大去背彩圖」送入 YOLO】
+    expanded_foreground = cv2.bitwise_and(ori_img, ori_img, mask=expanded_mask)
 
     annotated_frame = ori_img.copy()
-    bg_remove_render = foreground_only.copy()
+    bg_remove_render = expanded_foreground.copy()
     clean_frame = ori_img.copy() 
 
-    # ✨【核心修改點三：即時 API 串流自適應流向判定】
-    num_labels, _, _, _ = cv2.connectedComponentsWithStats(person_bgs_mask, connectivity=8)
-    if num_labels > 6:
-        detection_input = ori_img
-    else:
-        detection_input = foreground_only
+    # 🛠️ 【步驟三：將擴大去背圖送入 YOLO 進行偵測】
+    pose_results = pose_model(expanded_foreground, verbose=False, conf=0.3)
 
-    pose_results = pose_model(
-        detection_input,
-        verbose=False,
-        conf=0.3
-    )
+    if len(pose_results[0].boxes) > 0:
+        pose_results[0].orig_img = annotated_frame
+        annotated_frame = pose_results[0].plot(boxes=False)
 
-    skeleton_connections = [
-        (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13), 
-        (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 0), (0, 2), (0, 1)
-    ]
-
-    # ✨【核心修改點四：即時 API 串流手動強制繪製骨架與連線】
-    if pose_results[0].keypoints is not None and len(pose_results[0].boxes) > 0:
-        kpts = pose_results[0].keypoints.xy.cpu().numpy()
-        for person_kpts in kpts:
-            for point in person_kpts:
-                kx, ky = int(point[0]), int(point[1])
-                if kx > 0 and ky > 0:
-                    cv2.circle(bg_remove_render, (kx, ky), 3, (0, 255, 0), -1)
-                    cv2.circle(annotated_frame, (kx, ky), 3, (0, 255, 0), -1)
-            
-            for conn in skeleton_connections:
-                pt1_idx, pt2_idx = conn
-                if pt1_idx < len(person_kpts) and pt2_idx < len(person_kpts):
-                    pt1 = person_kpts[pt1_idx]
-                    pt2 = person_kpts[pt2_idx]
-                    if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
-                        p1_coord = (int(pt1[0]), int(pt1[1]))
-                        p2_coord = (int(pt2[0]), int(pt2[1]))
-                        cv2.line(bg_remove_render, p1_coord, p2_coord, (255, 255, 0), 2)
-                        cv2.line(annotated_frame, p1_coord, p2_coord, (255, 255, 0), 2)
+        pose_results[0].orig_img = bg_remove_render
+        bg_remove_render = pose_results[0].plot(boxes=False)
 
     detected_people_boxes = []
     detected_keypoints_list = []
+    
+    # 建立擦除畫布
+    person_erase_mask = np.zeros_like(base_mask)
 
     if len(pose_results[0].boxes) > 0:
         all_boxes = pose_results[0].boxes
-
-        if pose_results[0].keypoints is not None:
-            all_kpts_data = (
-                pose_results[0]
-                .keypoints
-                .xy
-                .cpu()
-                .numpy()
-                )
-        else:
-            all_kpts_data = None
+        all_kpts_data = pose_results[0].keypoints.xy.cpu().numpy() if pose_results[0].keypoints is not None else None
 
         for idx, box in enumerate(all_boxes):
             if int(box.cls[0]) == 0:
-                px1, py1, px2, py2 = map(
-                    int,
-                    box.xyxy[0]
-                )
+                px1, py1, px2, py2 = map(int, box.xyxy[0])
+                px1, py1 = max(0, px1), max(0, py1)
+                px2, py2 = min(ori_img.shape[1], px2), min(ori_img.shape[0], py2)
 
-                detected_people_boxes.append(
-                    (
-                        px1,
-                        py1,
-                        px2 - px1,
-                        py2 - py1
-                    )
-                )
+                detected_people_boxes.append((px1, py1, px2 - px1, py2 - py1))
 
-                if (
-                    all_kpts_data is not None
-                    and idx < len(all_kpts_data)
-                ):
+                # 🛠️ 【步驟四：在擦除遮罩上將人體範圍塗白】
+                cv2.rectangle(person_erase_mask, (px1, py1), (px2, py2), 255, -1)
+
+                if all_kpts_data is not None and idx < len(all_kpts_data):
                     detected_keypoints_list.append(all_kpts_data[idx])
                 else:
                     detected_keypoints_list.append(None)
-    frame_triggers = {
-        "running": False,
-        "loiter": False,
-        "faint": False,
-        "collision": False,
-        "litter": False
-    }
+
+    # 🛠️ 【步驟五：從原始遮罩中剪除人體區域】
+    geom_remaining_mask = cv2.bitwise_and(base_mask, cv2.bitwise_not(person_erase_mask))
+
+    # 🛠️ 【步驟六：將剩下的白塊向內縮減 10 像素】
+    obj_mask = cv2.erode(geom_remaining_mask, morph_kernel_10px, iterations=1)
+    obj_mask = postprocess_mask_for_object(obj_mask, kernel_size=3, min_area=20, border_ignore=10)
+
+    frame_triggers = {"running": False, "loiter": False, "faint": False, "collision": False, "litter": False}
     active_people = person_tracker.update(detected_people_boxes)
 
     for pid, bbox in active_people.items():
@@ -965,60 +655,26 @@ def analyze_one_frame(frame, mask, behavior_pack):
                 matched_kpts = detected_keypoints_list[idx]
 
         analyzer.update_person(pid, bbox, keypoints=matched_kpts)
-
         is_run, speed = analyzer.check_running(pid)
         is_loiter = analyzer.check_loitering(pid)
         is_fall = analyzer.check_fall(pid)
 
         for view in [annotated_frame, bg_remove_render, clean_frame]:
             cv2.rectangle(view, (px, py), (px + pw, py + ph), (255, 255, 255), 2)
-            cv2.putText(
-                view,
-                f"ID:{pid}",
-                (px, max(py - 8, 15)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (255, 255, 255),
-                1
-            )
+            cv2.putText(view, f"ID:{pid}", (px, max(py - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             if is_fall:
-                cv2.putText(
-                    view,
-                    " ALERT: FAINT!",
-                    (px - 10, py + ph + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 0, 255),
-                    2
-                )
+                cv2.putText(view, " ALERT: FAINT!", (px - 10, py + ph + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
                 frame_triggers["faint"] = True
             elif is_run:
-                cv2.putText(
-                    view,
-                    f"RUNNING ({int(speed)}%)",
-                    (px, py - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (0, 255, 255),
-                    1
-                )
+                cv2.putText(view, f"RUNNING ({int(speed)}%)", (px, py - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                 frame_triggers["running"] = True
 
             if is_loiter:
-                cv2.putText(
-                    view,
-                    "LOITERING",
-                    (px + pw - 65, py - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 0, 255),
-                    1
-                )
+                cv2.putText(view, "LOITERING", (px + pw - 65, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
                 frame_triggers["loiter"] = True
 
     pids = list(active_people.keys())
-
     for i in range(len(pids)):
         for j in range(i + 1, len(pids)):
             if analyzer.check_collision(pids[i], pids[j]):
@@ -1027,34 +683,19 @@ def analyze_one_frame(frame, mask, behavior_pack):
                 bx2, by2, _, _ = active_people[pids[j]]
 
                 for view in [annotated_frame, bg_remove_render, clean_frame]:
-                    cv2.putText(
-                        view,
-                        " COLLISION!",
-                        (((bx1 + bx2) // 2), ((by1 + by2) // 2)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 75, 255),
-                        2
-                    )
+                    cv2.putText(view, " COLLISION!", (((bx1 + bx2) // 2), ((by1 + by2) // 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 75, 255), 2)
 
     num_o, labels_o, stats_o, _ = cv2.connectedComponentsWithStats(obj_mask, connectivity=8)
     current_frame_object_boxes = []
 
     for i in range(1, num_o):
-        x = stats_o[i, 0]
-        y = stats_o[i, 1]
-        w = stats_o[i, 2]
-        h = stats_o[i, 3]
-        area = stats_o[i, 4]
+        x, y, w, h, area = stats_o[i, 0], stats_o[i, 1], stats_o[i, 2], stats_o[i, 3], stats_o[i, 4]
 
         if area < 15 or area > 450:
             continue
         if w < 3 or h < 3:
             continue
-
-        if (x <= 15 or y <= 15 or x + w >= 305 or y + h >= 225) and (
-            h >= 50 or (h / max(w, 1)) >= 1.4 or w <= 8 or h <= 8
-        ):
+        if (x <= 15 or y <= 15 or x + w >= 305 or y + h >= 225) and (h >= 50 or (h / max(w, 1)) >= 1.4 or w <= 8 or h <= 8):
             continue
 
         if not any(box_inside_or_overlap((x, y, w, h), b, 0.8) for b in detected_people_boxes):
@@ -1086,19 +727,15 @@ def analyze_one_frame(frame, mask, behavior_pack):
                     px, py, pw, ph = active_people[assigned_pid]
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
                         cv2.rectangle(view, (px, py), (px + pw, py + ph), (0, 0, 255), 3)
-                        cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", 
-                                    (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+                        cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
 
                 for view in [annotated_frame, bg_remove_render, clean_frame]:
                     cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 0, 255), 2)
-                    cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                    cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
             else:
                 for view in [annotated_frame, bg_remove_render, clean_frame]:
                     cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 255, 255), 1)
-                    cv2.putText(view, f"obj:{oid}", (ox, max(oy - 5, 15)), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
-
+                    cv2.putText(view, f"obj:{oid}", (ox, max(oy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
     else:
         state["object_missing_count"] += 1
         object_missing_count = state["object_missing_count"]
@@ -1106,10 +743,7 @@ def analyze_one_frame(frame, mask, behavior_pack):
 
         for oid, alive_count in list(object_alive_frames_dict.items()):
             if alive_count >= 5:
-                allowed_comp = min(
-                    int(BASE_COMPENSATION + (alive_count * TRUST_ACCUMULATION_RATE)),
-                    MAX_COMPENSATION
-                )
+                allowed_comp = min(int(BASE_COMPENSATION + (alive_count * TRUST_ACCUMULATION_RATE)), MAX_COMPENSATION)
 
                 if object_missing_count <= allowed_comp:
                     if oid in object_tracker.tracked_objects:
@@ -1125,16 +759,12 @@ def analyze_one_frame(frame, mask, behavior_pack):
                 lox, loy, low, loh = box
                 for view in [annotated_frame, bg_remove_render, clean_frame]:
                     cv2.rectangle(view, (lox, loy), (lox + low, loy + loh), (0, 165, 255), 1, cv2.LINE_AA)
-                    cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", 
-                                (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
+                    cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
         else:
             state["last_object_boxes"] = []
             object_alive_frames_dict.clear()
 
-    analyzer.clear_dead_tracks(
-        list(active_people.keys()),
-        list(object_tracker.tracked_objects.keys())
-    )
+    analyzer.clear_dead_tracks(list(active_people.keys()), list(object_tracker.tracked_objects.keys()))
 
     display_mask = obj_mask if obj_mask.max() == 255 else obj_mask * 255
     display_mask_3ch = cv2.cvtColor(display_mask, cv2.COLOR_GRAY2BGR)
