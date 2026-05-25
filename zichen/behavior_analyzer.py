@@ -345,170 +345,53 @@ class BehaviorAnalyzer:
 
         return False
 
+    # ===============   # 💥 4. 碰撞判定：多人同框 + 鼻子距離過近 + 移動方向劇烈改變
     # =========================================================================
-    # 💥 4. 碰撞判定：
-    # 人物框重疊 + 鼻點距離過近 + 腳點距離過近 + 鼻點偏離原路徑過大
-    # =========================================================================
-    def check_collision(
-        self,
-        pid_a,
-        pid_b,
-        dev_ratio_threshold=0.25,
-        nose_dist_threshold=20,
-        foot_dist_threshold=20
-    ):
+    def check_collision(self, pid_a, pid_b, dist_threshold=35):
         track_a = self.person_tracks.get(pid_a)
         track_b = self.person_tracks.get(pid_b)
-
-        # 需要至少 11 幀：
-        # track[-11]：較早位置
-        # track[-6] ：過去位置
-        # track[-1] ：目前位置
-        if not track_a or not track_b or len(track_a) < 11 or len(track_b) < 11:
+        if not track_a or not track_b or len(track_a) < 6 or len(track_b) < 6: 
             return False
 
-        # person_tracks 存的是中心點格式：(cx, cy, w, h, kpts)
-        acx, acy, aw, ah = track_a[-1][0:4]
-        bcx, bcy, bw, bh = track_b[-1][0:4]
-
-        # 將中心點格式轉成 x1, y1, x2, y2
-        box_a = (
-            acx - aw / 2,
-            acy - ah / 2,
-            acx + aw / 2,
-            acy + ah / 2,
-        )
-
-        box_b = (
-            bcx - bw / 2,
-            bcy - bh / 2,
-            bcx + bw / 2,
-            bcy + bh / 2,
-        )
-
-        # =====================================================
-        # 條件 1：兩人的人物框必須重疊
-        # =====================================================
-        is_overlapping = not (
-            box_a[2] < box_b[0]
-            or box_a[0] > box_b[2]
-            or box_a[3] < box_b[1]
-            or box_a[1] > box_b[3]
-        )
-
-        if not is_overlapping:
-            return False
-
-        # =====================================================
-        # 取得目前、過去、第 -11 幀的鼻點與腳點
-        # =====================================================
-        head_a_now, foot_a = self._get_head_foot_data(track_a[-1][4])
-        head_b_now, foot_b = self._get_head_foot_data(track_b[-1][4])
-
-        head_a_past, _ = self._get_head_foot_data(track_a[-6][4])
-        head_b_past, _ = self._get_head_foot_data(track_b[-6][4])
-
-        head_a_old, _ = self._get_head_foot_data(track_a[-11][4])
-        head_b_old, _ = self._get_head_foot_data(track_b[-11][4])
-
-        if not (
-            head_a_now
-            and head_b_now
-            and foot_a
-            and foot_b
-            and head_a_past
-            and head_b_past
-            and head_a_old
-            and head_b_old
-        ):
-            return False
-
-        # =====================================================
-        # 條件 2：兩人的鼻點距離必須在 20 像素內
-        # =====================================================
-        nose_dist = np.hypot(
-            head_a_now[0] - head_b_now[0],
-            head_a_now[1] - head_b_now[1]
-        )
-
-        if nose_dist > nose_dist_threshold:
-            return False
-
-        # =====================================================
-        # 條件 3：兩人的腳點距離必須在 20 像素內
-        # foot 是左右腳踝的中心點
-        # =====================================================
-        foot_dist = np.hypot(
-            foot_a[0] - foot_b[0],
-            foot_a[1] - foot_b[1]
-        )
-
-        if foot_dist > foot_dist_threshold:
-            return False
-
-        # =====================================================
-        # 計算 A、B 目前身高
-        # 使用鼻點到腳點距離作為身高基準
-        # =====================================================
-        hf_a = np.hypot(
-            head_a_now[0] - foot_a[0],
-            head_a_now[1] - foot_a[1]
-        )
-
-        hf_b = np.hypot(
-            head_b_now[0] - foot_b[0],
-            head_b_now[1] - foot_b[1]
-        )
-
-        if hf_a <= 1 or hf_b <= 1:
-            return False
-
-        # =====================================================
-        # 條件 4：A 的鼻點偏離原本預測路徑
-        # 原本移動向量 = 第 -6 幀鼻點 - 第 -11 幀鼻點
-        # 預測目前位置 = 第 -6 幀鼻點 + 原本移動向量
-        # =====================================================
-        v_orig_a_x = head_a_past[0] - head_a_old[0]
-        v_orig_a_y = head_a_past[1] - head_a_old[1]
-
-        expected_a_x = head_a_past[0] + v_orig_a_x
-        expected_a_y = head_a_past[1] + v_orig_a_y
-
-        dev_a = np.hypot(
-            head_a_now[0] - expected_a_x,
-            head_a_now[1] - expected_a_y
-        )
-
-        # =====================================================
-        # 條件 5：B 的鼻點偏離原本預測路徑
-        # =====================================================
-        v_orig_b_x = head_b_past[0] - head_b_old[0]
-        v_orig_b_y = head_b_past[1] - head_b_old[1]
-
-        expected_b_x = head_b_past[0] + v_orig_b_x
-        expected_b_y = head_b_past[1] + v_orig_b_y
-
-        dev_b = np.hypot(
-            head_b_now[0] - expected_b_x,
-            head_b_now[1] - expected_b_y
-        )
-
-        # =====================================================
-        # 動態門檻：
-        # 偏移量必須大於自身身高 × 0.25
-        # =====================================================
-        thresh_a = hf_a * dev_ratio_threshold
-        thresh_b = hf_b * dev_ratio_threshold
-
-        if dev_a > thresh_a or dev_b > thresh_b:
-            return True
-
+        # 1. 提取兩人在當前幀與 5 幀前的鼻子數據
+        head_a_now, foot_a = self._get_head_foot_data(track_a[-1][-1])
+        head_b_now, foot_b = self._get_head_foot_data(track_b[-1][-1])
+        head_a_past, _ = self._get_head_foot_data(track_a[-6][-1])
+        head_b_past, _ = self._get_head_foot_data(track_b[-6][-1])
+        
+        if head_a_now and head_b_now and head_a_past and head_b_past and foot_a and foot_b:
+            # 條件一：兩人的頭腳均保持一定距離（非躺地狀態）
+            hf_a = np.sqrt((head_a_now[0]-foot_a[0])**2 + (head_a_now[1]-foot_a[1])**2)
+            hf_b = np.sqrt((head_b_now[0]-foot_b[0])**2 + (head_b_now[1]-foot_b[1])**2)
+            if hf_a < 45 or hf_b < 45: return False
+            
+            # 條件二：兩人的【鼻子空間距離過近】
+            current_head_dist = np.sqrt((head_a_now[0] - head_b_now[0])**2 + (head_a_now[1] - head_b_now[1])**2)
+            if current_head_dist < dist_threshold:
+                
+                # 條件三：📐 運動學向量分析（檢查位移方向是否發生劇烈突變）
+                # 計算 A 過去 5 幀的移動向量
+                va_x = head_a_now[0] - head_a_past[0]
+                va_y = head_a_now[1] - head_a_past[1]
+                
+                # 同步去撈更早之前的歷史向量（10 幀前到 5 幀前），當作「碰撞前的原方向」
+                if len(track_a) >= 11:
+                    head_a_old, _ = self._get_head_foot_data(track_a[-11][-1])
+                    if head_a_old:
+                        v_orig_x = head_a_past[0] - head_a_old[0]
+                        v_orig_y = head_a_past[1] - head_a_old[1]
+                        
+                        # 計算原向量與新向量的內積
+                        mag_orig = np.sqrt(v_orig_x**2 + v_orig_y**2)
+                        mag_new = np.sqrt(va_x**2 + va_y**2)
+                        
+                        if mag_orig > 2 and mag_new > 1:
+                            cos_theta = (v_orig_x * va_x + v_orig_y * va_y) / (mag_orig * mag_new)
+                            # 如果 cos_theta < 0.2，代表夾角大於 78 度（包含反彈、急停、或死角折返），視為劇烈碰撞
+                            if cos_theta < 0.2:
+                                return True
+                return True # 若歷史資料不夠長，直接依據同框且鼻子過近觸發保險
         return False
-
-
-# 保留別名，避免其他程式有呼叫舊名稱
-def check_collision_by_deviation(self, pid_a, pid_b, dev_ratio_threshold=0.25):
-    return self.check_collision(pid_a, pid_b, dev_ratio_threshold)
 
 
 # =========================================================================
