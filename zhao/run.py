@@ -21,13 +21,14 @@ import test_new_HyRGB
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+SETTINGS_VERSION = 1
 
 EVENT_LABELS = {
     "running": "奔跑",
     "loiter": "徘徊",
     "faint": "跌倒",
     "collision": "碰撞",
-    "litter": "遺留物"
+    "litter": "丟垃圾"
 }
 
 EVENT_DIR_NAMES = {
@@ -310,8 +311,21 @@ class RunApp(tk.Tk):
             with open(SETTINGS_PATH, "r", encoding="utf-8") as file:
                 data = json.load(file)
         except Exception as exc:
-            print(f"設定檔讀取失敗: {exc}")
+            broken_path = os.path.join(
+                APP_DIR,
+                f"settings.broken.{int(time.time())}.json"
+            )
+
+            try:
+                shutil.copy2(SETTINGS_PATH, broken_path)
+                print(f"設定檔讀取失敗，已備份: {broken_path} ({exc})")
+            except OSError:
+                print(f"設定檔讀取失敗: {exc}")
+
             return
+
+        if data.get("version") not in (None, SETTINGS_VERSION):
+            print(f"設定檔版本不同，仍嘗試讀取: {data.get('version')}")
 
         for key, var in self._settings_vars().items():
             if key in data:
@@ -321,12 +335,44 @@ class RunApp(tk.Tk):
                     pass
 
     def _save_settings(self):
-        data = {key: var.get() for key, var in self._settings_vars().items()}
+        data = {
+            "version": SETTINGS_VERSION,
+            **{key: var.get() for key, var in self._settings_vars().items()}
+        }
 
         with open(SETTINGS_PATH, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
 
         self._log(f"設定已儲存: {SETTINGS_PATH}")
+
+    def export_settings(self):
+        path = filedialog.asksaveasfilename(
+            initialdir=APP_DIR,
+            initialfile="settings_export.json",
+            defaultextension=".json",
+            filetypes=(("JSON 設定檔", "*.json"), ("所有檔案", "*.*"))
+        )
+
+        if not path:
+            return
+
+        self._save_settings()
+        shutil.copy2(SETTINGS_PATH, path)
+        self._log(f"設定已匯出: {path}")
+
+    def import_settings(self):
+        path = filedialog.askopenfilename(
+            initialdir=APP_DIR,
+            filetypes=(("JSON 設定檔", "*.json"), ("所有檔案", "*.*"))
+        )
+
+        if not path:
+            return
+
+        shutil.copy2(path, SETTINGS_PATH)
+        self._load_settings()
+        self._log(f"設定已匯入: {path}")
+        messagebox.showinfo("設定檔", "設定已匯入，部分介面狀態重開 app 後會完整套用。")
 
     def _on_close(self):
         try:
@@ -362,6 +408,46 @@ class RunApp(tk.Tk):
         self._build_params_tab()
         self._build_events_tab()
         self._build_log_tab()
+        self._build_status_bar(root)
+
+    def _build_status_bar(self, parent):
+        self.status_text = tk.StringVar(value="")
+        status = ttk.Label(
+            parent,
+            textvariable=self.status_text,
+            anchor="w",
+            padding=(6, 4)
+        )
+        status.pack(fill="x", pady=(6, 0))
+        self._update_status_bar()
+
+    def _update_status_bar(self):
+        if self.tabs.select() == str(self.realtime_tab):
+            mode = "即時模式"
+        elif self.tabs.select() == str(self.offline_tab):
+            mode = "資料夾模式"
+        elif self.tabs.select() == str(self.events_tab):
+            mode = "事件資料夾"
+        elif self.tabs.select() == str(self.params_tab):
+            mode = "參數設定"
+        else:
+            mode = "執行紀錄"
+
+        event_count = sum(len(items) for items in self.event_items.values())
+        new_count = sum(
+            1
+            for items in self.event_items.values()
+            for item in items
+            if item.get("is_new")
+        )
+        saving = "儲存中" if self.monitor is not None else "未儲存"
+        self.status_text.set(
+            f"目前模式: {mode} | {self.current_display_fps.get()} | "
+            f"{saving} | 事件: {event_count} / 新事件: {new_count} | "
+            f"保存天數: {self.retention_days.get()}"
+        )
+
+        self.after(1000, self._update_status_bar)
 
     def _build_path_row(self, parent, row, label, var, command):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
@@ -460,9 +546,15 @@ class RunApp(tk.Tk):
         ).grid(row=4, column=1, sticky="w", padx=6, pady=3)
 
         controls = ttk.Frame(top)
-        controls.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        run_row = ttk.LabelFrame(controls, text="執行", padding=4)
+        play_row = ttk.LabelFrame(controls, text="播放", padding=4)
+        view_row = ttk.LabelFrame(controls, text="視窗", padding=4)
+        run_row.pack(fill="x", pady=2)
+        play_row.pack(fill="x", pady=2)
+        view_row.pack(fill="x", pady=2)
         self.start_realtime_button = ttk.Button(
-            controls,
+            run_row,
             text="開始即時",
             command=self.start_realtime
         )
@@ -470,34 +562,40 @@ class RunApp(tk.Tk):
             side="left",
             padx=(0, 6)
         )
-        ttk.Button(controls, text="停止", command=self.stop_current).pack(
+        ttk.Button(run_row, text="停止", command=self.stop_current).pack(
             side="left",
             padx=6
         )
         ttk.Button(
-            controls,
+            run_row,
             text="拍攝背景",
             command=self.capture_background
         ).pack(side="left", padx=6)
 
         ttk.Button(
-            controls,
+            play_row,
             text="播放/暫停",
             command=self.toggle_playback
         ).pack(side="left", padx=6)
 
-        ttk.Label(controls, text="倍速").pack(side="left", padx=(12, 4))
+        ttk.Label(play_row, text="倍速").pack(side="left", padx=(12, 4))
         ttk.Combobox(
-            controls,
+            play_row,
             textvariable=self.playback_speed,
             state="readonly",
             values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
             width=6
         ).pack(side="left", padx=4)
 
-        ttk.Label(controls, text="大視窗").pack(side="left", padx=(12, 4))
+        ttk.Button(
+            play_row,
+            text="從頭播放",
+            command=self.restart_playback
+        ).pack(side="left", padx=6)
+
+        ttk.Label(view_row, text="大視窗").pack(side="left", padx=(12, 4))
         ttk.Combobox(
-            controls,
+            view_row,
             textvariable=self.large_view,
             state="readonly",
             values=(
@@ -510,22 +608,16 @@ class RunApp(tk.Tk):
             width=20
         ).pack(side="left", padx=4)
         ttk.Button(
-            controls,
+            view_row,
             text="開啟大視窗",
             command=self.open_large_view
         ).pack(side="left", padx=6)
 
         ttk.Checkbutton(
-            controls,
+            view_row,
             text="填滿視窗",
             variable=self.large_view_fill,
             command=self.update_large_view_fill
-        ).pack(side="left", padx=6)
-
-        ttk.Button(
-            controls,
-            text="從頭播放",
-            command=self.restart_playback
         ).pack(side="left", padx=6)
 
         image_scroll = ScrollableFrame(self.realtime_tab)
@@ -638,9 +730,15 @@ class RunApp(tk.Tk):
         ).grid(row=5, column=1, sticky="w", padx=6, pady=3)
 
         controls = ttk.Frame(top)
-        controls.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        controls.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        run_row = ttk.LabelFrame(controls, text="執行", padding=4)
+        play_row = ttk.LabelFrame(controls, text="播放", padding=4)
+        view_row = ttk.LabelFrame(controls, text="視窗", padding=4)
+        run_row.pack(fill="x", pady=2)
+        play_row.pack(fill="x", pady=2)
+        view_row.pack(fill="x", pady=2)
         self.start_offline_button = ttk.Button(
-            controls,
+            run_row,
             text="開始資料夾分析",
             command=self.start_offline
         )
@@ -648,30 +746,30 @@ class RunApp(tk.Tk):
             side="left",
             padx=(0, 6)
         )
-        ttk.Button(controls, text="停止", command=self.stop_current).pack(
-            side="left",
-            padx=6
-        )
-        ttk.Button(controls, text="從頭播放", command=self.restart_playback).pack(
+        ttk.Button(run_row, text="停止", command=self.stop_current).pack(
             side="left",
             padx=6
         )
         ttk.Button(
-            controls,
+            play_row,
             text="播放/暫停",
             command=self.toggle_playback
         ).pack(side="left", padx=6)
-        ttk.Label(controls, text="倍速").pack(side="left", padx=(12, 4))
+        ttk.Label(play_row, text="倍速").pack(side="left", padx=(12, 4))
         ttk.Combobox(
-            controls,
+            play_row,
             textvariable=self.playback_speed,
             state="readonly",
             values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
             width=6
         ).pack(side="left", padx=4)
-        ttk.Label(controls, text="大視窗").pack(side="left", padx=(12, 4))
+        ttk.Button(play_row, text="從頭播放", command=self.restart_playback).pack(
+            side="left",
+            padx=6
+        )
+        ttk.Label(view_row, text="大視窗").pack(side="left", padx=(12, 4))
         ttk.Combobox(
-            controls,
+            view_row,
             textvariable=self.large_view,
             state="readonly",
             values=(
@@ -684,12 +782,12 @@ class RunApp(tk.Tk):
             width=20
         ).pack(side="left", padx=4)
         ttk.Button(
-            controls,
+            view_row,
             text="開啟大視窗",
             command=self.open_large_view
         ).pack(side="left", padx=6)
         ttk.Checkbutton(
-            controls,
+            view_row,
             text="填滿視窗",
             variable=self.large_view_fill,
             command=self.update_large_view_fill
@@ -759,6 +857,10 @@ class RunApp(tk.Tk):
             images.rowconfigure(row, weight=1)
 
     def _build_params_tab(self):
+        params_scroll = ScrollableFrame(self.params_tab)
+        params_scroll.pack(fill="both", expand=True)
+        params_root = params_scroll.inner
+
         groups = [
             (
                 "HyRGB 偵測參數",
@@ -806,7 +908,7 @@ class RunApp(tk.Tk):
         ]
 
         for group_index, (title, params) in enumerate(groups):
-            frame = ttk.LabelFrame(self.params_tab, text=title, padding=8)
+            frame = ttk.LabelFrame(params_root, text=title, padding=8)
             frame.grid(
                 row=group_index // 2,
                 column=group_index % 2,
@@ -828,19 +930,32 @@ class RunApp(tk.Tk):
             frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
-            self.params_tab,
+            params_root,
             text="啟用自動調整 varThreshold",
             variable=self.auto_varThreshold
         ).grid(row=2, column=0, sticky="w", padx=8, pady=8)
 
         ttk.Button(
-            self.params_tab,
+            params_root,
             text="儲存設定",
             command=self._save_settings
         ).grid(row=2, column=1, sticky="e", padx=8, pady=8)
 
-        storage_tools = ttk.LabelFrame(self.params_tab, text="儲存資料夾管理", padding=8)
-        storage_tools.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+        settings_tools = ttk.LabelFrame(params_root, text="設定檔管理", padding=8)
+        settings_tools.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+        ttk.Button(
+            settings_tools,
+            text="匯出設定檔",
+            command=self.export_settings
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            settings_tools,
+            text="匯入設定檔",
+            command=self.import_settings
+        ).pack(side="left")
+
+        storage_tools = ttk.LabelFrame(params_root, text="儲存資料夾管理", padding=8)
+        storage_tools.grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
         ttk.Button(
             storage_tools,
             text="清除超過保存天數的舊資料",
@@ -852,8 +967,8 @@ class RunApp(tk.Tk):
             command=self.clear_storage_folders
         ).pack(side="left")
 
-        self.params_tab.columnconfigure(0, weight=1)
-        self.params_tab.columnconfigure(1, weight=1)
+        params_root.columnconfigure(0, weight=1)
+        params_root.columnconfigure(1, weight=1)
 
     def _build_log_tab(self):
         self.log_text = tk.Text(self.log_tab, height=20, wrap="word")
@@ -993,7 +1108,13 @@ class RunApp(tk.Tk):
 
     def clear_storage_folders(self):
         roots = self._storage_roots()
-        message = "將清空以下程式輸出資料夾內容：\n\n" + "\n".join(roots)
+        message = (
+            "危險操作：這會清空程式輸出的事件影片、mask、效能紀錄與分析結果。\n"
+            "原始圖集與模型資料夾不會被清除。\n\n"
+            "將清空以下資料夾內容：\n\n"
+            + "\n".join(roots)
+            + "\n\n確定要繼續嗎？"
+        )
 
         if not messagebox.askyesno("清空儲存資料夾", message):
             return
@@ -1197,8 +1318,21 @@ class RunApp(tk.Tk):
 
         return max(videos, key=os.path.getmtime)
 
+    def _remove_event_folder_images(self, folder):
+        if not os.path.isdir(folder):
+            return
+
+        for name in os.listdir(folder):
+            if name.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
+                path = os.path.join(folder, name)
+
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    self._log(f"無法刪除事件資料夾圖片 {path}: {exc}")
+
     def _remember_event_frame(self, result):
-        frame = result.get("view1_box_only")
+        frame = result.get("view5_original")
 
         if frame is None:
             return
@@ -1212,13 +1346,14 @@ class RunApp(tk.Tk):
         )
 
     def _create_event_video(self, event_key, result, event_time=None):
-        image = result.get("view1_box_only")
+        image = result.get("view5_original")
 
         if image is None:
             return None
 
         folder = self._event_folder_for(event_key)
         os.makedirs(folder, exist_ok=True)
+        self._remove_event_folder_images(folder)
 
         frame_idx = result.get("frame_idx", 0)
         filename = f"gui_event_{frame_idx}_{int(time.time() * 1000)}.mp4"
@@ -1228,18 +1363,31 @@ class RunApp(tk.Tk):
         fps = 10.0
         writer = cv2.VideoWriter(video_path, fourcc, fps, (320, 240))
 
-        if event_time is None:
-            start_time = time.time() - 10
-            end_time = time.time()
-        else:
-            start_time = event_time - 5
-            end_time = event_time + 5
+        event_frame_idx = result.get("frame_idx")
 
-        frames = [
-            frame
-            for ts, _, frame in self.event_frame_buffer
-            if start_time <= ts <= end_time
-        ]
+        if result.get("source_mode") == "offline" and event_frame_idx is not None:
+            frame_radius = int(fps * 5)
+            frames = [
+                frame
+                for _, frame_idx, frame in self.event_frame_buffer
+                if (
+                    frame_idx is not None
+                    and event_frame_idx - frame_radius <= frame_idx <= event_frame_idx + frame_radius
+                )
+            ]
+        else:
+            if event_time is None:
+                start_time = time.time() - 10
+                end_time = time.time()
+            else:
+                start_time = event_time - 5
+                end_time = event_time + 5
+
+            frames = [
+                frame
+                for ts, _, frame in self.event_frame_buffer
+                if start_time <= ts <= end_time
+            ]
 
         if not frames:
             frames = [image]
@@ -1302,7 +1450,7 @@ class RunApp(tk.Tk):
             item = {
                 "event_key": event_key,
                 "frame_idx": result.get("frame_idx", len(self.event_items[event_key])),
-                "image": result.get("view1_box_only"),
+                "image": result.get("view5_original"),
                 "is_new": True,
                 "video_path": None,
                 "folder_path": self._event_folder_for(event_key)
@@ -1805,6 +1953,7 @@ class RunApp(tk.Tk):
             try:
                 while True:
                     result = self.result_queue.get_nowait()
+                    result["source_mode"] = "realtime"
                     self.output_buffer.append(result)
                     self.realtime_history.append((time.time(), result))
 
@@ -1971,6 +2120,7 @@ class RunApp(tk.Tk):
             collected_results = []
 
             def collect_result(result):
+                result["source_mode"] = "offline"
                 collected_results.append(result)
                 self.after(0, self._remember_event_frame, result)
 

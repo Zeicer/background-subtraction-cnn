@@ -291,15 +291,8 @@ def run_streaming_dataset(
                         result["view2_skeleton"]
                     )
 
-                    for behavior_name, triggered in result["frame_triggers"].items():
-                        if triggered and behavior_name in behavior_dirs:
-                            cv2.imwrite(
-                                os.path.join(
-                                    behavior_dirs[behavior_name],
-                                    f"{name}_{behavior_name}.jpg"
-                                ),
-                                result["view2_skeleton"]
-                            )
+                    # Five behavior folders are reserved for event videos.
+                    # GUI event clips are written there as mp4 files.
 
     finally:
         mask_video.release()
