@@ -301,29 +301,41 @@ def main(
             iterations=2
         )
 
+        # ✅ YOLO 判斷前先將遮罩向外放大 5 個像素
+        # 先用放大後的遮罩計算白塊數量，再決定 YOLO 要吃去背圖或原圖。
+        mask_expand_pixels = 5
+        mask_expand_kernel = np.ones(
+            (mask_expand_pixels * 2 + 1, mask_expand_pixels * 2 + 1),
+            np.uint8
+        )
+        expanded_person_bgs_mask = cv2.dilate(
+            person_bgs_mask,
+            mask_expand_kernel,
+            iterations=1
+        )
+
         foreground_only = cv2.bitwise_and(
             ori_img,
             ori_img,
-            mask=person_bgs_mask
+            mask=expanded_person_bgs_mask
         )
 
-        annotated_frame = ori_img.copy() 
+        annotated_frame = ori_img.copy()
         bg_remove_render = foreground_only.copy()
         clean_frame = ori_img.copy()
 
-        # ✅ YOLO 判斷前背景剪除條件：
         # connectedComponentsWithStats 會把「背景」也算成一個 label，
         # 因此真正白塊數量 = num_labels - 1。
-        # 白塊數量必須介於 1 到 3，才使用背景剪除後的 foreground_only；
-        # 若白塊為 0 或 >= 4，代表沒有前景或 mask 太破碎，改用原圖 ori_img。
         num_labels, _, _, _ = cv2.connectedComponentsWithStats(
-            person_bgs_mask,
+            expanded_person_bgs_mask,
             connectivity=8
         )
 
-        white_block_count = num_labels - 1
+        white_block_count = max(num_labels - 1, 0)
 
-        if 0 < white_block_count < 4:
+        # 白塊數量 < 4：使用放大遮罩後的去背圖給 YOLO 判斷。
+        # 白塊數量 >= 4：mask 太破碎，改用原圖給 YOLO 判斷。
+        if white_block_count < 4:
             detection_input = foreground_only
         else:
             detection_input = ori_img
@@ -566,18 +578,8 @@ def main(
                     frame_triggers["litter"] = True
                     assigned_pid = getattr(analyzer, "object_owner_memory", {}).get(oid)
 
-                    if assigned_pid is not None and assigned_pid in active_people:
-                        px, py, pw, ph = active_people[assigned_pid]
-
-                        for view in [annotated_frame, bg_remove_render, clean_frame]:
-                            cv2.rectangle(view, (px, py), (px + pw, py + ph), (0, 0, 255), 3)
-                            cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", 
-                                        (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
-
-                    for view in [annotated_frame, bg_remove_render, clean_frame]:
-                        cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 0, 255), 2)
-                        cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                    # 已隱藏紅色垃圾/亂丟警示框與文字。
+                    # 保留 is_litter 觸發邏輯，只是不在畫面上畫紅框。
                 else:
                     for view in [annotated_frame, bg_remove_render, clean_frame]:
                         cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 255, 255), 1)
@@ -605,12 +607,9 @@ def main(
                     object_alive_frames_dict.pop(oid, None)
 
             if len(valid_compensation_boxes) > 0:
-                for oid, box, allowed_comp in valid_compensation_boxes:
-                    lox, loy, low, loh = box
-                    for view in [annotated_frame, bg_remove_render, clean_frame]:
-                        cv2.rectangle(view, (lox, loy), (lox + low, loy + loh), (0, 165, 255), 1, cv2.LINE_AA)
-                        cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", 
-                                    (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
+                # 已隱藏橘色補償框與 Tracking Lost 文字。
+                # 保留補償追蹤邏輯，只是不在畫面上畫出來。
+                pass
             else:
                 last_object_boxes = []
                 object_alive_frames_dict.clear()
@@ -838,29 +837,41 @@ def analyze_one_frame(frame, mask, behavior_pack):
         iterations=2
     )
 
+    # ✅ YOLO 判斷前先將遮罩向外放大 5 個像素
+    # 先用放大後的遮罩計算白塊數量，再決定 YOLO 要吃去背圖或原圖。
+    mask_expand_pixels = 5
+    mask_expand_kernel = np.ones(
+        (mask_expand_pixels * 2 + 1, mask_expand_pixels * 2 + 1),
+        np.uint8
+    )
+    expanded_person_bgs_mask = cv2.dilate(
+        person_bgs_mask,
+        mask_expand_kernel,
+        iterations=1
+    )
+
     foreground_only = cv2.bitwise_and(
         ori_img,
         ori_img,
-        mask=person_bgs_mask
+        mask=expanded_person_bgs_mask
     )
 
     annotated_frame = ori_img.copy()
     bg_remove_render = foreground_only.copy()
-    clean_frame = ori_img.copy() 
+    clean_frame = ori_img.copy()
 
-    # ✅ YOLO 判斷前背景剪除條件：
     # connectedComponentsWithStats 會把「背景」也算成一個 label，
     # 因此真正白塊數量 = num_labels - 1。
-    # 白塊數量必須介於 1 到 3，才使用背景剪除後的 foreground_only；
-    # 若白塊為 0 或 >= 4，代表沒有前景或 mask 太破碎，改用原圖 ori_img。
     num_labels, _, _, _ = cv2.connectedComponentsWithStats(
-        person_bgs_mask,
+        expanded_person_bgs_mask,
         connectivity=8
     )
 
-    white_block_count = num_labels - 1
+    white_block_count = max(num_labels - 1, 0)
 
-    if 0 < white_block_count < 4:
+    # 白塊數量 < 4：使用放大遮罩後的去背圖給 YOLO 判斷。
+    # 白塊數量 >= 4：mask 太破碎，改用原圖給 YOLO 判斷。
+    if white_block_count < 4:
         detection_input = foreground_only
     else:
         detection_input = ori_img
@@ -1056,17 +1067,9 @@ def analyze_one_frame(frame, mask, behavior_pack):
             if is_litter:
                 frame_triggers["litter"] = True
                 assigned_pid = getattr(analyzer, "object_owner_memory", {}).get(oid)
-                if assigned_pid is not None and assigned_pid in active_people:
-                    px, py, pw, ph = active_people[assigned_pid]
-                    for view in [annotated_frame, bg_remove_render, clean_frame]:
-                        cv2.rectangle(view, (px, py), (px + pw, py + ph), (0, 0, 255), 3)
-                        cv2.putText(view, f"LITTERER CAUGHT! (ID:{assigned_pid})", 
-                                    (px, max(py - 22, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
 
-                for view in [annotated_frame, bg_remove_render, clean_frame]:
-                    cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 0, 255), 2)
-                    cv2.putText(view, f"LITTER OBJ:{oid}", (ox, max(oy - 5, 15)), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                # 已隱藏紅色垃圾/亂丟警示框與文字。
+                # 保留 is_litter 觸發邏輯，只是不在畫面上畫紅框。
             else:
                 for view in [annotated_frame, bg_remove_render, clean_frame]:
                     cv2.rectangle(view, (ox, oy), (ox + ow, oy + oh), (0, 255, 255), 1)
@@ -1095,12 +1098,9 @@ def analyze_one_frame(frame, mask, behavior_pack):
                 object_alive_frames_dict.pop(oid, None)
 
         if len(valid_compensation_boxes) > 0:
-            for oid, box, allowed_comp in valid_compensation_boxes:
-                lox, loy, low, loh = box
-                for view in [annotated_frame, bg_remove_render, clean_frame]:
-                    cv2.rectangle(view, (lox, loy), (lox + low, loy + loh), (0, 165, 255), 1, cv2.LINE_AA)
-                    cv2.putText(view, f"Tracking Lost ({object_missing_count}/{allowed_comp})", 
-                                (lox, max(loy - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 165, 255), 1)
+            # 已隱藏橘色補償框與 Tracking Lost 文字。
+            # 保留補償追蹤邏輯，只是不在畫面上畫出來。
+            pass
         else:
             state["last_object_boxes"] = []
             object_alive_frames_dict.clear()
