@@ -187,6 +187,112 @@ class BehaviorAnalyzer:
             return True
 
         return False
+# =========================================================================
+    # 🏃 2. 跑步判定：
+    # 目前高度接近過去 10 幀平均高度 + 過去 10 段平均位移夠大
+    # =========================================================================
+    def check_running(self, pid, fps=30, movement_threshold=10):
+        track = self.person_tracks.get(pid)
+
+        # 需要至少 11 幀：
+        # - 目前幀：track[-1]
+        # - 過去 10 幀高度：track[-11:-1]
+        # - 最近 10 段位移：track[-11] 到 track[-1] 之間的連續鼻點位移
+        if not track or len(track) < 11:
+            return False, 0
+
+        # =====================================================
+        # 取得目前幀頭點與腳點
+        # =====================================================
+        kpts_now = track[-1][4]
+        head_now, foot_now = self._get_head_foot_data(kpts_now)
+
+        if not head_now or not foot_now:
+            return False, 0
+
+        hx, hy = head_now
+        fx, fy = foot_now
+
+        current_height = fy - hy
+
+        if current_height <= 0:
+            return False, 0
+
+        # =====================================================
+        # 條件 1：目前高度 > 過去 10 幀平均高度 × 0.90
+        # =====================================================
+        past_heights = []
+
+        # 過去 10 幀，不包含目前幀
+        for item in list(track)[-11:-1]:
+            kpts = item[4]
+            head, foot = self._get_head_foot_data(kpts)
+
+            if head and foot:
+                vertical_height = foot[1] - head[1]
+
+                if vertical_height > 0:
+                    past_heights.append(vertical_height)
+
+        # 過去 10 幀至少要有 5 幀有效高度
+        if len(past_heights) < 5:
+            return False, 0
+
+        avg_past_height = np.mean(past_heights)
+
+        if avg_past_height <= 0:
+            return False, 0
+
+        height_ok = current_height > avg_past_height * 0.90
+
+        # =====================================================
+        # 條件 2：最近 10 段鼻點平均位移 > movement_threshold
+        # =====================================================
+        recent_tracks = list(track)[-11:]
+
+        head_points = []
+
+        for item in recent_tracks:
+            kpts = item[4]
+            head, _ = self._get_head_foot_data(kpts)
+
+            if head:
+                head_points.append(head)
+
+        # 需要至少 6 個有效頭點，才有足夠位移資料
+        if len(head_points) < 6:
+            return False, 0
+
+        movements = []
+
+        for i in range(1, len(head_points)):
+            prev_x, prev_y = head_points[i - 1]
+            curr_x, curr_y = head_points[i]
+
+            movement = np.hypot(
+                curr_x - prev_x,
+                curr_y - prev_y
+            )
+
+            movements.append(movement)
+
+        if len(movements) == 0:
+            return False, 0
+
+        avg_movement = np.mean(movements)
+
+        movement_ok = avg_movement > movement_threshold
+
+        # 換算成每秒像素速度，這裡是平均每幀位移 × FPS
+        pixel_speed_per_second = avg_movement * fps
+
+        # =====================================================
+        # 最終判斷
+        # =====================================================
+        if height_ok and movement_ok:
+            return True, pixel_speed_per_second
+
+        return False, pixel_speed_per_second
 
     # =========================================================================
     # 🚶 3. 徘徊判定：頭腳高度比例 + 頭部點位移固定範圍內
@@ -240,12 +346,24 @@ class BehaviorAnalyzer:
         return False
 
     # =========================================================================
-    # 💥 4. 碰撞判定：人物框重疊 + 鼻點偏離原路徑過大
+    # 💥 4. 碰撞判定：
+    # 人物框重疊 + 鼻點距離過近 + 腳點距離過近 + 鼻點偏離原路徑過大
     # =========================================================================
-    def check_collision(self, pid_a, pid_b, dev_ratio_threshold=0.25):
+    def check_collision(
+        self,
+        pid_a,
+        pid_b,
+        dev_ratio_threshold=0.25,
+        nose_dist_threshold=20,
+        foot_dist_threshold=20
+    ):
         track_a = self.person_tracks.get(pid_a)
         track_b = self.person_tracks.get(pid_b)
 
+        # 需要至少 11 幀：
+        # track[-11]：較早位置
+        # track[-6] ：過去位置
+        # track[-1] ：目前位置
         if not track_a or not track_b or len(track_a) < 11 or len(track_b) < 11:
             return False
 
@@ -253,12 +371,14 @@ class BehaviorAnalyzer:
         acx, acy, aw, ah = track_a[-1][0:4]
         bcx, bcy, bw, bh = track_b[-1][0:4]
 
+        # 將中心點格式轉成 x1, y1, x2, y2
         box_a = (
             acx - aw / 2,
             acy - ah / 2,
             acx + aw / 2,
             acy + ah / 2,
         )
+
         box_b = (
             bcx - bw / 2,
             bcy - bh / 2,
@@ -266,6 +386,9 @@ class BehaviorAnalyzer:
             bcy + bh / 2,
         )
 
+        # =====================================================
+        # 條件 1：兩人的人物框必須重疊
+        # =====================================================
         is_overlapping = not (
             box_a[2] < box_b[0]
             or box_a[0] > box_b[2]
@@ -276,6 +399,9 @@ class BehaviorAnalyzer:
         if not is_overlapping:
             return False
 
+        # =====================================================
+        # 取得目前、過去、第 -11 幀的鼻點與腳點
+        # =====================================================
         head_a_now, foot_a = self._get_head_foot_data(track_a[-1][4])
         head_b_now, foot_b = self._get_head_foot_data(track_b[-1][4])
 
@@ -288,21 +414,60 @@ class BehaviorAnalyzer:
         if not (
             head_a_now
             and head_b_now
+            and foot_a
+            and foot_b
             and head_a_past
             and head_b_past
             and head_a_old
             and head_b_old
-            and foot_a
-            and foot_b
         ):
             return False
 
-        hf_a = np.hypot(head_a_now[0] - foot_a[0], head_a_now[1] - foot_a[1])
-        hf_b = np.hypot(head_b_now[0] - foot_b[0], head_b_now[1] - foot_b[1])
+        # =====================================================
+        # 條件 2：兩人的鼻點距離必須在 20 像素內
+        # =====================================================
+        nose_dist = np.hypot(
+            head_a_now[0] - head_b_now[0],
+            head_a_now[1] - head_b_now[1]
+        )
+
+        if nose_dist > nose_dist_threshold:
+            return False
+
+        # =====================================================
+        # 條件 3：兩人的腳點距離必須在 20 像素內
+        # foot 是左右腳踝的中心點
+        # =====================================================
+        foot_dist = np.hypot(
+            foot_a[0] - foot_b[0],
+            foot_a[1] - foot_b[1]
+        )
+
+        if foot_dist > foot_dist_threshold:
+            return False
+
+        # =====================================================
+        # 計算 A、B 目前身高
+        # 使用鼻點到腳點距離作為身高基準
+        # =====================================================
+        hf_a = np.hypot(
+            head_a_now[0] - foot_a[0],
+            head_a_now[1] - foot_a[1]
+        )
+
+        hf_b = np.hypot(
+            head_b_now[0] - foot_b[0],
+            head_b_now[1] - foot_b[1]
+        )
 
         if hf_a <= 1 or hf_b <= 1:
             return False
 
+        # =====================================================
+        # 條件 4：A 的鼻點偏離原本預測路徑
+        # 原本移動向量 = 第 -6 幀鼻點 - 第 -11 幀鼻點
+        # 預測目前位置 = 第 -6 幀鼻點 + 原本移動向量
+        # =====================================================
         v_orig_a_x = head_a_past[0] - head_a_old[0]
         v_orig_a_y = head_a_past[1] - head_a_old[1]
 
@@ -311,9 +476,12 @@ class BehaviorAnalyzer:
 
         dev_a = np.hypot(
             head_a_now[0] - expected_a_x,
-            head_a_now[1] - expected_a_y,
+            head_a_now[1] - expected_a_y
         )
 
+        # =====================================================
+        # 條件 5：B 的鼻點偏離原本預測路徑
+        # =====================================================
         v_orig_b_x = head_b_past[0] - head_b_old[0]
         v_orig_b_y = head_b_past[1] - head_b_old[1]
 
@@ -322,9 +490,13 @@ class BehaviorAnalyzer:
 
         dev_b = np.hypot(
             head_b_now[0] - expected_b_x,
-            head_b_now[1] - expected_b_y,
+            head_b_now[1] - expected_b_y
         )
 
+        # =====================================================
+        # 動態門檻：
+        # 偏移量必須大於自身身高 × 0.25
+        # =====================================================
         thresh_a = hf_a * dev_ratio_threshold
         thresh_b = hf_b * dev_ratio_threshold
 
@@ -333,25 +505,33 @@ class BehaviorAnalyzer:
 
         return False
 
-    # 保留別名，避免其他程式有呼叫舊名稱
-    def check_collision_by_deviation(self, pid_a, pid_b, dev_ratio_threshold=0.25):
-        return self.check_collision(pid_a, pid_b, dev_ratio_threshold)
+
+# 保留別名，避免其他程式有呼叫舊名稱
+def check_collision_by_deviation(self, pid_a, pid_b, dev_ratio_threshold=0.25):
+    return self.check_collision(pid_a, pid_b, dev_ratio_threshold)
+
 
 # =========================================================================
-# 🚯 5. 丟垃圾 / 亂丟行為判定：
-# 只要新物件在 YOLO 手腕點附近產生，就判定為亂丟行為
-# =========================================================================
+    # 🚯 5. 丟垃圾 / 亂丟行為判定：
+    # 3 幀 ≤ 新物件出現時間 ≤ 20 幀
+    # 且新物件靠近 YOLO 左 / 右手腕點，就判定為亂丟行為
+    # =========================================================================
     def check_littering(
         self,
         oid,
-        hand_birth_threshold=60,
-        birth_frames=20
+        hand_birth_threshold=15,
+        min_birth_frames=10,
+        max_birth_frames=20
     ):
         """
         判斷條件：
-        1. 物件是新出現的物件，也就是軌跡長度 <= birth_frames
+        1. 物件是新出現的物件，但至少要穩定出現 3 幀
+        min_birth_frames <= len(obj_track) <= max_birth_frames
+
         2. 物件中心點靠近某人物的 YOLO 左手腕或右手腕
-        3. 距離小於 hand_birth_threshold
+
+        3. 最近手腕距離 < hand_birth_threshold
+
         → 直接判定丟垃圾 / 亂丟行為
         """
 
@@ -374,9 +554,15 @@ class BehaviorAnalyzer:
         if oid in self.throwing_event_objects:
             return False
 
-        # 只判斷「新物件」
-        # 如果物件已經存在超過 birth_frames 幀，就不再當作剛產生的物件
-        if len(obj_track) > birth_frames:
+        # =====================================================
+        # 條件 1：物件出現時間必須介於 3 幀到 20 幀之間
+        # =====================================================
+        obj_age = len(obj_track)
+
+        if obj_age < min_birth_frames:
+            return False
+
+        if obj_age > max_birth_frames:
             return False
 
         # object_tracks 存的是中心點格式：(cx, cy, w, h)
@@ -385,7 +571,9 @@ class BehaviorAnalyzer:
         best_pid = None
         min_hand_dist = hand_birth_threshold
 
-        # 檢查所有人物的 YOLO 手腕點
+        # =====================================================
+        # 條件 2：檢查物件是否靠近任一人物左 / 右手腕
+        # =====================================================
         for pid, p_track in self.person_tracks.items():
             if not p_track:
                 continue
@@ -405,10 +593,14 @@ class BehaviorAnalyzer:
                 hand_dists = []
 
                 if lw_x > 0 and lw_y > 0:
-                    hand_dists.append(np.hypot(ocx - lw_x, ocy - lw_y))
+                    hand_dists.append(
+                        np.hypot(ocx - lw_x, ocy - lw_y)
+                    )
 
                 if rw_x > 0 and rw_y > 0:
-                    hand_dists.append(np.hypot(ocx - rw_x, ocy - rw_y))
+                    hand_dists.append(
+                        np.hypot(ocx - rw_x, ocy - rw_y)
+                    )
 
                 if not hand_dists:
                     continue
@@ -422,7 +614,9 @@ class BehaviorAnalyzer:
             except Exception:
                 continue
 
-        # 只要新物件靠近任一人物手腕點，就立刻判定亂丟
+        # =====================================================
+        # 條件 3：最近手腕距離 < 15 像素，直接判定亂丟
+        # =====================================================
         if best_pid is not None:
             self.object_owner_memory[oid] = best_pid
             self.throwing_event_objects.add(oid)
