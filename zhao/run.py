@@ -1,6 +1,7 @@
 import os
 import queue
 import json
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -10,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-
+# import finalsecond_zichen
 import finalsecond
 from function_monitor import PerformanceMonitor
 import main_run
@@ -97,10 +98,51 @@ class ImagePanel(ttk.Frame):
                 Image.LANCZOS
             )
         else:
-            image.thumbnail((self.width, self.height), Image.LANCZOS)
+            pass
 
         self.photo = ImageTk.PhotoImage(image)
         self.label.configure(image=self.photo)
+
+
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, highlightthickness=0, background="#f5f7fb")
+        self.scrollbar = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self.canvas.yview
+        )
+        self.inner = ttk.Frame(self.canvas)
+        self.window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.inner,
+            anchor="nw"
+        )
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        self.inner.bind("<Configure>", self._update_scroll_region)
+        self.canvas.bind("<Configure>", self._resize_inner)
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+
+    def _update_scroll_region(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _resize_inner(self, event):
+        self.canvas.itemconfigure(self.window_id, width=max(event.width, 1))
+
+    def _bind_mousewheel(self, _event=None):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event=None):
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 
 class RunApp(tk.Tk):
@@ -118,10 +160,15 @@ class RunApp(tk.Tk):
         self.monitor = None
         self.result_queue = queue.Queue(maxsize=8)
         self.output_buffer = deque(maxlen=8)
+        self.realtime_history = deque(maxlen=10000)
+        self.realtime_seek_mode = False
+        self.timeline_updating = False
         self.playback_results = []
         self.playback_index = 0
         self.offline_processing = False
         self.last_result = None
+        self.last_realtime_result = None
+        self.last_offline_result = None
         self.last_display_time = 0.0
         self.large_window = None
         self.large_panel = None
@@ -140,6 +187,8 @@ class RunApp(tk.Tk):
         self.event_cover_refs = []
         self.selected_event = None
         self.event_cover_frame = None
+        self.realtime_panels = {}
+        self.offline_panels = {}
         self.show_new_only = tk.BooleanVar(value=False)
         self.event_search = tk.StringVar(value="")
         self.stopping = False
@@ -203,12 +252,19 @@ class RunApp(tk.Tk):
         self.crop_margin = tk.IntVar(value=50)
         self.display_fps = tk.DoubleVar(value=10)
         self.display_delay_seconds = tk.DoubleVar(value=0.5)
+        self.retention_days = tk.IntVar(value=5)
         self.playback_paused = tk.BooleanVar(value=False)
         self.playback_speed = tk.DoubleVar(value=1.0)
         self.large_view = tk.StringVar(value="view2_skeleton")
         self.large_view_fill = tk.BooleanVar(value=False)
         self.offline_progress = tk.DoubleVar(value=0.0)
         self.offline_progress_text = tk.StringVar(value="尚未開始")
+        self.realtime_timeline = tk.DoubleVar(value=180.0)
+        self.realtime_timeline_text = tk.StringVar(value="即時回顧: 最新")
+        self.offline_timeline = tk.DoubleVar(value=0.0)
+        self.offline_timeline_text = tk.StringVar(value="圖集回顧: 0/0")
+        self.realtime_settings_collapsed = tk.BooleanVar(value=False)
+        self.offline_settings_collapsed = tk.BooleanVar(value=False)
 
     def _settings_vars(self):
         return {
@@ -238,9 +294,12 @@ class RunApp(tk.Tk):
             "crop_margin": self.crop_margin,
             "display_fps": self.display_fps,
             "display_delay_seconds": self.display_delay_seconds,
+            "retention_days": self.retention_days,
             "playback_speed": self.playback_speed,
             "large_view": self.large_view,
             "large_view_fill": self.large_view_fill,
+            "realtime_settings_collapsed": self.realtime_settings_collapsed,
+            "offline_settings_collapsed": self.offline_settings_collapsed,
         }
 
     def _load_settings(self):
@@ -316,9 +375,43 @@ class RunApp(tk.Tk):
         )
         parent.columnconfigure(1, weight=1)
 
+    def _build_collapsible_settings(self, parent, title, collapsed_var):
+        wrapper = ttk.Frame(parent)
+        wrapper.pack(fill="x")
+
+        header = ttk.Frame(wrapper)
+        header.pack(fill="x")
+
+        button_text = tk.StringVar()
+        content = ttk.LabelFrame(wrapper, text=title, padding=8)
+
+        def sync():
+            if collapsed_var.get():
+                content.pack_forget()
+                button_text.set(f"展開{title}")
+            else:
+                content.pack(fill="x", pady=(4, 0))
+                button_text.set(f"收起{title}")
+
+        def toggle():
+            collapsed_var.set(not collapsed_var.get())
+            sync()
+
+        ttk.Button(
+            header,
+            textvariable=button_text,
+            command=toggle
+        ).pack(side="left")
+
+        sync()
+        return content
+
     def _build_realtime_tab(self):
-        top = ttk.LabelFrame(self.realtime_tab, text="即時模式設定", padding=8)
-        top.pack(fill="x")
+        top = self._build_collapsible_settings(
+            self.realtime_tab,
+            "即時模式設定",
+            self.realtime_settings_collapsed
+        )
 
         self._build_path_row(
             top,
@@ -435,18 +528,20 @@ class RunApp(tk.Tk):
             command=self.restart_playback
         ).pack(side="left", padx=6)
 
-        images = ttk.Frame(self.realtime_tab)
-        images.pack(fill="both", expand=True, pady=(8, 0))
+        image_scroll = ScrollableFrame(self.realtime_tab)
+        image_scroll.pack(fill="both", expand=True, pady=(8, 0))
+        images = image_scroll.inner
 
-        self.panels = {
+        self.realtime_panels = {
             "view1_box_only": ImagePanel(images, "1. 只顯示框線"),
             "view2_skeleton": ImagePanel(images, "2. 框線 + 骨架"),
             "view3_mask_overlay": ImagePanel(images, "3. 遮罩疊圖"),
             "view4_mask": ImagePanel(images, "4. 純遮罩"),
             "view5_original": ImagePanel(images, "5. 原始畫面"),
         }
+        self.panels = self.realtime_panels
 
-        for idx, panel in enumerate(self.panels.values()):
+        for idx, panel in enumerate(self.realtime_panels.values()):
             panel.grid(
                 row=idx // 3,
                 column=idx % 3,
@@ -467,9 +562,35 @@ class RunApp(tk.Tk):
             textvariable=self.current_display_fps
         ).pack(side="left")
 
+        timeline = ttk.Frame(self.realtime_tab)
+        timeline.pack(fill="x", pady=(6, 0))
+        ttk.Label(timeline, text="3 分鐘回顧").pack(side="left", padx=(0, 8))
+        self.realtime_timeline_scale = ttk.Scale(
+            timeline,
+            from_=0,
+            to=180,
+            orient="horizontal",
+            variable=self.realtime_timeline,
+            command=self.seek_realtime_timeline
+        )
+        self.realtime_timeline_scale.pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            timeline,
+            textvariable=self.realtime_timeline_text,
+            width=18
+        ).pack(side="left", padx=8)
+        ttk.Button(
+            timeline,
+            text="回到最新",
+            command=self.jump_realtime_latest
+        ).pack(side="left")
+
     def _build_offline_tab(self):
-        top = ttk.LabelFrame(self.offline_tab, text="資料夾模式設定", padding=8)
-        top.pack(fill="x")
+        top = self._build_collapsible_settings(
+            self.offline_tab,
+            "資料夾模式設定",
+            self.offline_settings_collapsed
+        )
 
         self._build_path_row(
             top,
@@ -535,6 +656,44 @@ class RunApp(tk.Tk):
             side="left",
             padx=6
         )
+        ttk.Button(
+            controls,
+            text="播放/暫停",
+            command=self.toggle_playback
+        ).pack(side="left", padx=6)
+        ttk.Label(controls, text="倍速").pack(side="left", padx=(12, 4))
+        ttk.Combobox(
+            controls,
+            textvariable=self.playback_speed,
+            state="readonly",
+            values=(0.25, 0.5, 1.0, 1.5, 2.0, 4.0),
+            width=6
+        ).pack(side="left", padx=4)
+        ttk.Label(controls, text="大視窗").pack(side="left", padx=(12, 4))
+        ttk.Combobox(
+            controls,
+            textvariable=self.large_view,
+            state="readonly",
+            values=(
+                "view1_box_only",
+                "view2_skeleton",
+                "view3_mask_overlay",
+                "view4_mask",
+                "view5_original"
+            ),
+            width=20
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            controls,
+            text="開啟大視窗",
+            command=self.open_large_view
+        ).pack(side="left", padx=6)
+        ttk.Checkbutton(
+            controls,
+            text="填滿視窗",
+            variable=self.large_view_fill,
+            command=self.update_large_view_fill
+        ).pack(side="left", padx=6)
 
         progress_frame = ttk.Frame(top)
         progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 2))
@@ -556,6 +715,48 @@ class RunApp(tk.Tk):
             wraplength=900
         )
         info.pack(anchor="w", pady=10)
+
+        timeline = ttk.LabelFrame(self.offline_tab, text="圖集回顧時間軸", padding=8)
+        timeline.pack(fill="x", pady=(0, 8))
+        self.offline_timeline_scale = ttk.Scale(
+            timeline,
+            from_=0,
+            to=0,
+            orient="horizontal",
+            variable=self.offline_timeline,
+            command=self.seek_offline_timeline
+        )
+        self.offline_timeline_scale.pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            timeline,
+            textvariable=self.offline_timeline_text,
+            width=18
+        ).pack(side="left", padx=8)
+
+        image_scroll = ScrollableFrame(self.offline_tab)
+        image_scroll.pack(fill="both", expand=True, pady=(8, 0))
+        images = image_scroll.inner
+        self.offline_panels = {
+            "view1_box_only": ImagePanel(images, "1. 只顯示框線"),
+            "view2_skeleton": ImagePanel(images, "2. 框線 + 骨架"),
+            "view3_mask_overlay": ImagePanel(images, "3. 遮罩疊圖"),
+            "view4_mask": ImagePanel(images, "4. 純遮罩"),
+            "view5_original": ImagePanel(images, "5. 原始畫面"),
+        }
+
+        for idx, panel in enumerate(self.offline_panels.values()):
+            panel.grid(
+                row=idx // 3,
+                column=idx % 3,
+                sticky="nsew",
+                padx=6,
+                pady=6
+            )
+
+        for col in range(3):
+            images.columnconfigure(col, weight=1)
+        for row in range(2):
+            images.rowconfigure(row, weight=1)
 
     def _build_params_tab(self):
         groups = [
@@ -599,6 +800,7 @@ class RunApp(tk.Tk):
                     ("資料夾儲存模式", self.offline_save_mode),
                     ("輸出資料夾", self.output_dir),
                     ("背景圖路徑", self.background_path),
+                    ("資料保存天數", self.retention_days),
                 ],
             ),
         ]
@@ -636,6 +838,19 @@ class RunApp(tk.Tk):
             text="儲存設定",
             command=self._save_settings
         ).grid(row=2, column=1, sticky="e", padx=8, pady=8)
+
+        storage_tools = ttk.LabelFrame(self.params_tab, text="儲存資料夾管理", padding=8)
+        storage_tools.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+        ttk.Button(
+            storage_tools,
+            text="清除超過保存天數的舊資料",
+            command=self.cleanup_old_storage
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            storage_tools,
+            text="清空儲存資料夾",
+            command=self.clear_storage_folders
+        ).pack(side="left")
 
         self.params_tab.columnconfigure(0, weight=1)
         self.params_tab.columnconfigure(1, weight=1)
@@ -685,6 +900,115 @@ class RunApp(tk.Tk):
             output_dir = os.path.join(self.base_dir.get(), output_dir)
 
         return os.path.join(output_dir, "event")
+
+    def _resolved_output_dir(self):
+        output_dir = self.output_dir.get()
+
+        if not os.path.isabs(output_dir):
+            output_dir = os.path.join(self.base_dir.get(), output_dir)
+
+        return output_dir
+
+    def _storage_roots(self):
+        base_dir = self.base_dir.get()
+        roots = [
+            self._resolved_output_dir(),
+            os.path.join(base_dir, "realtime_event_output"),
+            os.path.join(base_dir, "maskpicture"),
+            os.path.join(base_dir, "1111"),
+            os.path.join(base_dir, "11111"),
+            os.path.join(base_dir, "logs"),
+        ]
+
+        cleaned = []
+        blocked = {
+            os.path.abspath(base_dir),
+            os.path.abspath(self.dataset_dir.get()) if self.dataset_dir.get() else "",
+            os.path.abspath(self.roi_model_dir.get()) if self.roi_model_dir.get() else "",
+        }
+
+        for path in roots:
+            path = os.path.abspath(path)
+            if path not in blocked and path not in cleaned:
+                cleaned.append(path)
+
+        return cleaned
+
+    def _delete_path_contents(self, path):
+        deleted = 0
+
+        if not os.path.isdir(path):
+            return deleted
+
+        for name in os.listdir(path):
+            target = os.path.join(path, name)
+
+            try:
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
+                else:
+                    os.remove(target)
+                deleted += 1
+            except OSError as exc:
+                self._log(f"無法刪除 {target}: {exc}")
+
+        return deleted
+
+    def _cleanup_old_storage_files(self):
+        retention_days = max(1, int(self.retention_days.get()))
+        cutoff = time.time() - retention_days * 86400
+        deleted = 0
+
+        for root in self._storage_roots():
+            if not os.path.isdir(root):
+                continue
+
+            for current_root, dirs, files in os.walk(root, topdown=False):
+                for name in files:
+                    path = os.path.join(current_root, name)
+
+                    try:
+                        if os.path.getmtime(path) < cutoff:
+                            os.remove(path)
+                            deleted += 1
+                    except OSError as exc:
+                        self._log(f"無法刪除舊檔 {path}: {exc}")
+
+                for name in dirs:
+                    path = os.path.join(current_root, name)
+
+                    try:
+                        if not os.listdir(path) and os.path.getmtime(path) < cutoff:
+                            os.rmdir(path)
+                            deleted += 1
+                    except OSError:
+                        pass
+
+        return deleted
+
+    def cleanup_old_storage(self):
+        deleted = self._cleanup_old_storage_files()
+        self._log(f"已清除超過 {self.retention_days.get()} 天的舊資料，共 {deleted} 個項目。")
+        messagebox.showinfo("儲存資料夾", f"已清除舊資料，共 {deleted} 個項目。")
+
+    def clear_storage_folders(self):
+        roots = self._storage_roots()
+        message = "將清空以下程式輸出資料夾內容：\n\n" + "\n".join(roots)
+
+        if not messagebox.askyesno("清空儲存資料夾", message):
+            return
+
+        deleted = 0
+        for root in roots:
+            deleted += self._delete_path_contents(root)
+
+        self.event_items = {event: [] for event in EVENT_LABELS}
+        self.event_seen.clear()
+        self.event_last_accept_time.clear()
+        self._clear_event_alert()
+        self.refresh_event_covers()
+        self._log(f"已清空儲存資料夾，共刪除 {deleted} 個項目。")
+        messagebox.showinfo("儲存資料夾", f"已清空儲存資料夾，共刪除 {deleted} 個項目。")
 
     def open_folder(self, path):
         os.makedirs(path, exist_ok=True)
@@ -1189,8 +1513,36 @@ class RunApp(tk.Tk):
         if hasattr(self, "start_offline_button"):
             self.start_offline_button.configure(state=state)
 
+    def _active_result(self):
+        if self.tabs.select() == str(self.offline_tab):
+            return self.last_offline_result
+
+        return self.last_realtime_result
+
+    def _show_result(self, result, panels):
+        if result is None:
+            return
+
+        for key, panel in panels.items():
+            panel.set_image(result.get(key))
+
+        if (
+            self.large_panel is not None
+            and self.large_window is not None
+            and self.large_window.winfo_exists()
+        ):
+            self.large_panel.set_image(
+                self._active_result().get(self.large_view_key)
+                if self._active_result() is not None
+                else None
+            )
+
     def toggle_playback(self):
         self.playback_paused.set(not self.playback_paused.get())
+
+        if not self.playback_paused.get() and self.realtime_seek_mode:
+            self.jump_realtime_latest()
+
         status = "暫停顯示" if self.playback_paused.get() else "繼續播放"
         self._log(status)
 
@@ -1200,8 +1552,13 @@ class RunApp(tk.Tk):
             return
 
         self.playback_index = 0
+        self.timeline_updating = True
+        self.offline_timeline.set(0)
+        self.timeline_updating = False
+        self._update_offline_timeline_label()
         self.playback_paused.set(False)
         self.last_result = None
+        self.last_offline_result = None
         self._log("已從頭播放資料夾結果。")
 
     def _start_offline_playback(self, results):
@@ -1209,6 +1566,72 @@ class RunApp(tk.Tk):
         self.playback_index = 0
         self.playback_paused.set(False)
         self.last_result = None
+        self.last_offline_result = None
+        max_index = max(0, len(results) - 1)
+        self.offline_timeline_scale.configure(to=max_index)
+        self.timeline_updating = True
+        self.offline_timeline.set(0)
+        self.timeline_updating = False
+        self._update_offline_timeline_label()
+
+    def _update_offline_timeline_label(self):
+        total = len(self.playback_results)
+        current = min(self.playback_index + 1, total) if total else 0
+        self.offline_timeline_text.set(f"圖集回顧: {current}/{total}")
+
+    def seek_offline_timeline(self, value):
+        if self.timeline_updating:
+            return
+
+        if not self.playback_results:
+            return
+
+        index = int(round(float(value)))
+        index = max(0, min(len(self.playback_results) - 1, index))
+        self.playback_index = index
+        self.last_result = self.playback_results[index]
+        self.last_offline_result = self.last_result
+        self.playback_paused.set(True)
+        self._update_offline_timeline_label()
+
+    def seek_realtime_timeline(self, value):
+        if self.timeline_updating:
+            return
+
+        history = [
+            (ts, result)
+            for ts, result in self.realtime_history
+            if time.time() - ts <= 180
+        ]
+
+        if not history:
+            return
+
+        position = max(0.0, min(180.0, float(value)))
+        seconds_from_latest = 180 - position
+        target_time = history[-1][0] - seconds_from_latest
+        index = min(
+            range(len(history)),
+            key=lambda idx: abs(history[idx][0] - target_time)
+        )
+        self.realtime_seek_mode = position < 179.5
+        self.playback_paused.set(True)
+        self.last_result = history[index][1]
+        self.last_realtime_result = self.last_result
+        self.realtime_timeline_text.set(f"回看: -{int(round(seconds_from_latest))} 秒")
+
+    def jump_realtime_latest(self):
+        self.realtime_seek_mode = False
+        self.timeline_updating = True
+        self.realtime_timeline.set(180.0)
+        self.timeline_updating = False
+        self.realtime_timeline_text.set("即時回顧: 最新")
+
+        if self.realtime_history:
+            self.last_result = self.realtime_history[-1][1]
+            self.last_realtime_result = self.last_result
+
+        self.playback_paused.set(False)
 
     def open_large_view(self):
         self.large_view_key = self.large_view.get()
@@ -1230,9 +1653,11 @@ class RunApp(tk.Tk):
         self.large_panel.set_fill_window(self.large_view_fill.get())
         self.large_panel.pack(fill="both", expand=True, padx=10, pady=10)
 
-        if self.last_result is not None:
+        active_result = self._active_result()
+
+        if active_result is not None:
             self.large_panel.set_image(
-                self.last_result.get(self.large_view_key)
+                active_result.get(self.large_view_key)
             )
 
     def update_large_view_fill(self):
@@ -1251,7 +1676,14 @@ class RunApp(tk.Tk):
         self.stop_event.clear()
         self.stopping = False
         self._set_running_state(True)
+        self._cleanup_old_storage_files()
         self.output_buffer.clear()
+        self.realtime_history = deque(maxlen=10000)
+        self.realtime_seek_mode = False
+        self.timeline_updating = True
+        self.realtime_timeline.set(180.0)
+        self.timeline_updating = False
+        self.realtime_timeline_text.set("即時回顧: 最新")
         self.playback_results = []
         self.playback_index = 0
         self.event_frame_buffer.clear()
@@ -1259,6 +1691,7 @@ class RunApp(tk.Tk):
         self.offline_progress.set(0)
         self.offline_progress_text.set("0%")
         self.last_result = None
+        self.last_realtime_result = None
         self.playback_paused.set(False)
         self._start_monitor("run_realtime", self.base_dir.get())
 
@@ -1373,6 +1806,13 @@ class RunApp(tk.Tk):
                 while True:
                     result = self.result_queue.get_nowait()
                     self.output_buffer.append(result)
+                    self.realtime_history.append((time.time(), result))
+
+                    while (
+                        self.realtime_history
+                        and time.time() - self.realtime_history[0][0] > 180
+                    ):
+                        self.realtime_history.popleft()
                     self._remember_event_frame(result)
 
                     if any(result.get("frame_triggers", {}).values()):
@@ -1393,28 +1833,39 @@ class RunApp(tk.Tk):
                 if self.playback_results:
                     if self.playback_index < len(self.playback_results):
                         self.last_result = self.playback_results[self.playback_index]
+                        self.last_offline_result = self.last_result
                         self.playback_index += 1
+                        self.timeline_updating = True
+                        self.offline_timeline.set(max(0, self.playback_index - 1))
+                        self.timeline_updating = False
+                        self._update_offline_timeline_label()
                     elif self.playback_results:
                         self.last_result = self.playback_results[-1]
+                        self.last_offline_result = self.last_result
 
                 else:
                     if len(self.output_buffer) > delay_frames:
                         self.last_result = self.output_buffer.popleft()
+                        self.last_realtime_result = self.last_result
+                        if not self.realtime_seek_mode:
+                            self.timeline_updating = True
+                            self.realtime_timeline.set(180.0)
+                            self.timeline_updating = False
+                            self.realtime_timeline_text.set("即時回顧: 最新")
                     elif self.last_result is None and self.output_buffer:
                         self.last_result = self.output_buffer.popleft()
+                        self.last_realtime_result = self.last_result
+                        if not self.realtime_seek_mode:
+                            self.timeline_updating = True
+                            self.realtime_timeline.set(180.0)
+                            self.timeline_updating = False
+                            self.realtime_timeline_text.set("即時回顧: 最新")
 
             if self.last_result is not None:
-                for key, panel in self.panels.items():
-                    panel.set_image(self.last_result.get(key))
-
-                if (
-                    self.large_panel is not None
-                    and self.large_window is not None
-                    and self.large_window.winfo_exists()
-                ):
-                    self.large_panel.set_image(
-                        self.last_result.get(self.large_view_key)
-                    )
+                if self.playback_results:
+                    self._show_result(self.last_offline_result, self.offline_panels)
+                else:
+                    self._show_result(self.last_realtime_result, self.realtime_panels)
 
                 self._update_display_fps(now)
 
@@ -1476,12 +1927,21 @@ class RunApp(tk.Tk):
         self.stop_event.clear()
         self.stopping = False
         self._set_running_state(True)
+        self._cleanup_old_storage_files()
         self.offline_progress_counts = (0, 0)
         self.output_buffer.clear()
+        self.realtime_history.clear()
+        self.realtime_seek_mode = False
         self.playback_results = []
         self.playback_index = 0
+        self.timeline_updating = True
+        self.offline_timeline.set(0)
+        self.timeline_updating = False
+        self.offline_timeline_scale.configure(to=0)
+        self.offline_timeline_text.set("圖集回顧: 0/0")
         self.event_frame_buffer.clear()
         self.last_result = None
+        self.last_offline_result = None
         self.offline_processing = True
         self.playback_paused.set(False)
         self.offline_thread = threading.Thread(
@@ -1489,7 +1949,7 @@ class RunApp(tk.Tk):
             daemon=True
         )
         self.offline_thread.start()
-        self.tabs.select(self.realtime_tab)
+        self.tabs.select(self.offline_tab)
         self._log("資料夾分析已開始。")
 
     def _offline_worker(self):
@@ -1507,6 +1967,7 @@ class RunApp(tk.Tk):
 
             self.output_buffer.clear()
             self.last_result = None
+            self.last_offline_result = None
             collected_results = []
 
             def collect_result(result):
