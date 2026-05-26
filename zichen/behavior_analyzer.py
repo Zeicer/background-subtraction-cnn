@@ -297,7 +297,7 @@ class BehaviorAnalyzer:
     # =========================================================================
     # 🚶 3. 徘徊判定：頭腳高度比例 + 頭部點位移固定範圍內
     # =========================================================================
-    def check_loitering(self, pid, range_threshold=30, min_frames=150):
+    def check_loitering(self, pid, range_threshold=30, min_frames=120):
         track = self.person_tracks.get(pid)
         if not track or len(track) < min_frames:
             return False
